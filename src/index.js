@@ -6,7 +6,7 @@ const {
   setUserState, getUserState, clearUserState,
   createDeposit, getPendingDeposits, approveDeposit, rejectDeposit,
   createWithdrawal, getPendingWithdrawals, approveWithdrawal, rejectWithdrawal,
-  createBet, settleBet, getUserBets,
+  createBet, settleBet, getUserBets, getPendingBets,
 } = require("./database");
 
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
@@ -30,6 +30,7 @@ function fmtBal(credits) { return credits.toFixed(2) + " créditos"; }
 function cupToCredits(cup) { return Math.round(cup * CUP_TO_CREDIT * 100) / 100; }
 function creditsToCup(credits) { return Math.round(credits / CUP_TO_CREDIT * 100) / 100; }
 
+// ============ MENÚ PRINCIPAL USUARIO ============
 function mainMenu() {
   return new InlineKeyboard()
     .text("⚽ Apostar", "bet_menu").text("💰 Saldo", "balance").row()
@@ -37,14 +38,295 @@ function mainMenu() {
     .text("📊 Mis Apuestas", "history").text("❓ Ayuda", "help");
 }
 
+// ============ MENÚ ADMIN ============
+function adminMenu() {
+  return new InlineKeyboard()
+    .text("📥 Depósitos", "admin_deposits").text("📤 Retiros", "admin_withdrawals").row()
+    .text("⏳ Apuestas", "admin_bets").text("👤 Añadir Saldo", "admin_addsaldo").row()
+    .text("🏠 Menú Usuario", "back_menu");
+}
+
+// ============ /START ============
 bot.command("start", async (ctx) => {
   ensureUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
+  const kb = mainMenu();
+  if (isAdmin(ctx.from.id)) {
+    kb.row().text("🔧 Admin", "admin_menu");
+  }
   await ctx.reply(
     "¡Hola " + ctx.from.first_name + "! 👋\n\nBot de Apuestas Deportivas ⚽🎰\n\n💰 Tu saldo: " + fmtBal(getUserBalance(ctx.from.id)),
-    { reply_markup: mainMenu() }
+    { reply_markup: kb }
   );
 });
 
+// ============ ADMIN MENU ============
+bot.callbackQuery("admin_menu", async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  await ctx.answerCallbackQuery();
+  const deps = getPendingDeposits();
+  const wds = getPendingWithdrawals();
+  const bets = getPendingBets();
+  await ctx.editMessageText(
+    "🔧 *PANEL DE ADMIN*\n\n" +
+    "📥 Depósitos pendientes: " + deps.length + "\n" +
+    "📤 Retiros pendientes: " + wds.length + "\n" +
+    "⏳ Apuestas pendientes: " + bets.length + "\n\n" +
+    "Selecciona una opción:",
+    { parse_mode: "Markdown", reply_markup: adminMenu() }
+  );
+});
+
+// ============ ADMIN: DEPÓSITOS PENDIENTES ============
+bot.callbackQuery("admin_deposits", async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  await ctx.answerCallbackQuery();
+  const deps = getPendingDeposits();
+  if (!deps.length) {
+    await ctx.editMessageText(
+      "📥 *DEPÓSITOS PENDIENTES*\n\n✅ No hay depósitos pendientes.",
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") }
+    );
+    return;
+  }
+  let msg = "📥 *DEPÓSITOS PENDIENTES*\n\n";
+  const kb = new InlineKeyboard();
+  for (const d of deps) {
+    const method = d.method === "transferencia" ? "🏦" : "📱";
+    msg += method + " #" + d.id + " | " + d.amount_cup + " CUP → " + fmtBal(d.credits) + "\n";
+    msg += "   👤 User: " + d.user_id;
+    if (d.phone) msg += " | 📱 " + d.phone;
+    if (d.reference) msg += "\n   📝 Ref: " + d.reference;
+    msg += "\n\n";
+    kb.text("✅ #" + d.id, "adep_" + d.id + "_ok").text("❌ #" + d.id, "adep_" + d.id + "_no").row();
+  }
+  kb.text("🔙 Admin", "admin_menu");
+  await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+});
+
+// Aprobar depósito con botón
+bot.callbackQuery(/^adep_(\d+)_ok$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  const id = Number(ctx.match[1]);
+  const dep = approveDeposit(id, ctx.from.id);
+  if (!dep) { await ctx.answerCallbackQuery("❌ Ya procesado"); return; }
+  await ctx.answerCallbackQuery("✅ Depósito #" + id + " aprobado");
+  try { await bot.api.sendMessage(dep.user_id, "✅ *Depósito aprobado*\n📋 #" + id + "\n🪙 +" + fmtBal(dep.credits) + "\n💰 Saldo: " + fmtBal(getUserBalance(dep.user_id)), { parse_mode: "Markdown" }); } catch {}
+  // Refrescar lista
+  ctx.callbackQuery.data = "admin_deposits";
+  await ctx.answerCallbackQuery();
+  const deps = getPendingDeposits();
+  if (!deps.length) {
+    await ctx.editMessageText("📥 *DEPÓSITOS*\n\n✅ Todos procesados.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") });
+  } else {
+    let msg = "📥 *DEPÓSITOS PENDIENTES*\n\n";
+    const kb = new InlineKeyboard();
+    for (const d of deps) {
+      const method = d.method === "transferencia" ? "🏦" : "📱";
+      msg += method + " #" + d.id + " | " + d.amount_cup + " CUP → " + fmtBal(d.credits) + "\n";
+      msg += "   👤 User: " + d.user_id;
+      if (d.phone) msg += " | 📱 " + d.phone;
+      if (d.reference) msg += "\n   📝 Ref: " + d.reference;
+      msg += "\n\n";
+      kb.text("✅ #" + d.id, "adep_" + d.id + "_ok").text("❌ #" + d.id, "adep_" + d.id + "_no").row();
+    }
+    kb.text("🔙 Admin", "admin_menu");
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+  }
+});
+
+// Rechazar depósito con botón
+bot.callbackQuery(/^adep_(\d+)_no$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  const id = Number(ctx.match[1]);
+  const dep = rejectDeposit(id, ctx.from.id);
+  if (!dep) { await ctx.answerCallbackQuery("❌ Ya procesado"); return; }
+  await ctx.answerCallbackQuery("❌ Depósito #" + id + " rechazado");
+  try { await bot.api.sendMessage(dep.user_id, "❌ *Depósito rechazado*\n📋 #" + id + "\nContacta al admin si es un error.", { parse_mode: "Markdown" }); } catch {}
+  // Refrescar lista
+  const deps = getPendingDeposits();
+  if (!deps.length) {
+    await ctx.editMessageText("📥 *DEPÓSITOS*\n\n✅ Todos procesados.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") });
+  } else {
+    let msg = "📥 *DEPÓSITOS PENDIENTES*\n\n";
+    const kb = new InlineKeyboard();
+    for (const d of deps) {
+      const method = d.method === "transferencia" ? "🏦" : "📱";
+      msg += method + " #" + d.id + " | " + d.amount_cup + " CUP → " + fmtBal(d.credits) + "\n";
+      msg += "   👤 User: " + d.user_id;
+      if (d.phone) msg += " | 📱 " + d.phone;
+      if (d.reference) msg += "\n   📝 Ref: " + d.reference;
+      msg += "\n\n";
+      kb.text("✅ #" + d.id, "adep_" + d.id + "_ok").text("❌ #" + d.id, "adep_" + d.id + "_no").row();
+    }
+    kb.text("🔙 Admin", "admin_menu");
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+  }
+});
+
+// ============ ADMIN: RETIROS PENDIENTES ============
+bot.callbackQuery("admin_withdrawals", async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  await ctx.answerCallbackQuery();
+  const wds = getPendingWithdrawals();
+  if (!wds.length) {
+    await ctx.editMessageText(
+      "📤 *RETIROS PENDIENTES*\n\n✅ No hay retiros pendientes.",
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") }
+    );
+    return;
+  }
+  let msg = "📤 *RETIROS PENDIENTES*\n\n";
+  const kb = new InlineKeyboard();
+  for (const w of wds) {
+    const method = w.method === "transferencia" ? "🏦" : "📱";
+    msg += method + " #" + w.id + " | " + fmtBal(w.amount_credits) + " → " + w.amount_cup + " CUP\n";
+    msg += "   👤 User: " + w.user_id + " | 📱 → " + w.destination + "\n\n";
+    kb.text("✅ #" + w.id, "aret_" + w.id + "_ok").text("❌ #" + w.id, "aret_" + w.id + "_no").row();
+  }
+  kb.text("🔙 Admin", "admin_menu");
+  await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+});
+
+// Aprobar retiro con botón
+bot.callbackQuery(/^aret_(\d+)_ok$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  const id = Number(ctx.match[1]);
+  const wd = approveWithdrawal(id, ctx.from.id);
+  if (!wd) { await ctx.answerCallbackQuery("❌ Ya procesado"); return; }
+  await ctx.answerCallbackQuery("✅ Retiro #" + id + " aprobado");
+  try { await bot.api.sendMessage(wd.user_id, "✅ *Retiro aprobado*\n📋 #" + id + "\n💵 " + wd.amount_cup + " CUP → " + wd.destination, { parse_mode: "Markdown" }); } catch {}
+  // Refrescar lista
+  const wds = getPendingWithdrawals();
+  if (!wds.length) {
+    await ctx.editMessageText("📤 *RETIROS*\n\n✅ Todos procesados.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") });
+  } else {
+    let msg = "📤 *RETIROS PENDIENTES*\n\n";
+    const kb = new InlineKeyboard();
+    for (const w of wds) {
+      const method = w.method === "transferencia" ? "🏦" : "📱";
+      msg += method + " #" + w.id + " | " + fmtBal(w.amount_credits) + " → " + w.amount_cup + " CUP\n";
+      msg += "   👤 User: " + w.user_id + " | 📱 → " + w.destination + "\n\n";
+      kb.text("✅ #" + w.id, "aret_" + w.id + "_ok").text("❌ #" + w.id, "aret_" + w.id + "_no").row();
+    }
+    kb.text("🔙 Admin", "admin_menu");
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+  }
+});
+
+// Rechazar retiro con botón
+bot.callbackQuery(/^aret_(\d+)_no$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  const id = Number(ctx.match[1]);
+  const wd = rejectWithdrawal(id, ctx.from.id);
+  if (!wd) { await ctx.answerCallbackQuery("❌ Ya procesado"); return; }
+  await ctx.answerCallbackQuery("❌ Retiro #" + id + " rechazado - créditos devueltos");
+  try { await bot.api.sendMessage(wd.user_id, "❌ *Retiro rechazado*\n📋 #" + id + "\n🪙 " + fmtBal(wd.amount_credits) + " devueltos\n💰 Saldo: " + fmtBal(getUserBalance(wd.user_id)), { parse_mode: "Markdown" }); } catch {}
+  // Refrescar lista
+  const wds = getPendingWithdrawals();
+  if (!wds.length) {
+    await ctx.editMessageText("📤 *RETIROS*\n\n✅ Todos procesados.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") });
+  } else {
+    let msg = "📤 *RETIROS PENDIENTES*\n\n";
+    const kb = new InlineKeyboard();
+    for (const w of wds) {
+      const method = w.method === "transferencia" ? "🏦" : "📱";
+      msg += method + " #" + w.id + " | " + fmtBal(w.amount_credits) + " → " + w.amount_cup + " CUP\n";
+      msg += "   👤 User: " + w.user_id + " | 📱 → " + w.destination + "\n\n";
+      kb.text("✅ #" + w.id, "aret_" + w.id + "_ok").text("❌ #" + w.id, "aret_" + w.id + "_no").row();
+    }
+    kb.text("🔙 Admin", "admin_menu");
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+  }
+});
+
+// ============ ADMIN: APUESTAS PENDIENTES ============
+bot.callbackQuery("admin_bets", async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  await ctx.answerCallbackQuery();
+  const bets = getPendingBets();
+  if (!bets.length) {
+    await ctx.editMessageText(
+      "⏳ *APUESTAS PENDIENTES*\n\n✅ No hay apuestas pendientes.",
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") }
+    );
+    return;
+  }
+  let msg = "⏳ *APUESTAS PENDIENTES*\n\n";
+  const kb = new InlineKeyboard();
+  for (const b of bets) {
+    msg += "📋 #" + b.id + " | " + b.fixture_name + "\n";
+    msg += "   " + b.bet_label + " @ " + b.odds + " | " + fmtBal(b.stake) + " → " + fmtBal(b.potential_win) + "\n";
+    msg += "   👤 User: " + b.user_id + "\n\n";
+    kb.text("✅ #" + b.id, "abet_" + b.id + "_won").text("❌ #" + b.id, "abet_" + b.id + "_lost").row();
+  }
+  kb.text("🔙 Admin", "admin_menu");
+  await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+});
+
+// Apuesta ganada
+bot.callbackQuery(/^abet_(\d+)_won$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  const id = Number(ctx.match[1]);
+  const bet = settleBet(id, "won", "Admin: ganada");
+  if (!bet) { await ctx.answerCallbackQuery("❌ Ya resuelta"); return; }
+  await ctx.answerCallbackQuery("✅ Apuesta #" + id + " → GANADA");
+  try { await bot.api.sendMessage(bet.user_id, "🎉 *¡GANASTE!*\n📋 #" + id + "\n🏆 +" + fmtBal(bet.potential_win) + "\n💰 Saldo: " + fmtBal(getUserBalance(bet.user_id)), { parse_mode: "Markdown" }); } catch {}
+  // Refrescar
+  const bets = getPendingBets();
+  if (!bets.length) {
+    await ctx.editMessageText("⏳ *APUESTAS*\n\n✅ Todas resueltas.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") });
+  } else {
+    let msg = "⏳ *APUESTAS PENDIENTES*\n\n";
+    const kb2 = new InlineKeyboard();
+    for (const b of bets) {
+      msg += "📋 #" + b.id + " | " + b.fixture_name + "\n";
+      msg += "   " + b.bet_label + " @ " + b.odds + " | " + fmtBal(b.stake) + " → " + fmtBal(b.potential_win) + "\n";
+      msg += "   👤 User: " + b.user_id + "\n\n";
+      kb2.text("✅ #" + b.id, "abet_" + b.id + "_won").text("❌ #" + b.id, "abet_" + b.id + "_lost").row();
+    }
+    kb2.text("🔙 Admin", "admin_menu");
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb2 });
+  }
+});
+
+// Apuesta perdida
+bot.callbackQuery(/^abet_(\d+)_lost$/, async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  const id = Number(ctx.match[1]);
+  const bet = settleBet(id, "lost", "Admin: perdida");
+  if (!bet) { await ctx.answerCallbackQuery("❌ Ya resuelta"); return; }
+  await ctx.answerCallbackQuery("❌ Apuesta #" + id + " → PERDIDA");
+  try { await bot.api.sendMessage(bet.user_id, "😞 *Perdiste*\n📋 #" + id + "\n🪙 -" + fmtBal(bet.stake), { parse_mode: "Markdown" }); } catch {}
+  // Refrescar
+  const bets = getPendingBets();
+  if (!bets.length) {
+    await ctx.editMessageText("⏳ *APUESTAS*\n\n✅ Todas resueltas.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Admin", "admin_menu") });
+  } else {
+    let msg = "⏳ *APUESTAS PENDIENTES*\n\n";
+    const kb2 = new InlineKeyboard();
+    for (const b of bets) {
+      msg += "📋 #" + b.id + " | " + b.fixture_name + "\n";
+      msg += "   " + b.bet_label + " @ " + b.odds + " | " + fmtBal(b.stake) + " → " + fmtBal(b.potential_win) + "\n";
+      msg += "   👤 User: " + b.user_id + "\n\n";
+      kb2.text("✅ #" + b.id, "abet_" + b.id + "_won").text("❌ #" + b.id, "abet_" + b.id + "_lost").row();
+    }
+    kb2.text("🔙 Admin", "admin_menu");
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb2 });
+  }
+});
+
+// ============ ADMIN: AÑADIR SALDO ============
+bot.callbackQuery("admin_addsaldo", async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCallbackQuery("❌ No eres admin"); return; }
+  await ctx.answerCallbackQuery();
+  setUserState(ctx.from.id, "admin_addsaldo");
+  await ctx.editMessageText(
+    "👤 *AÑADIR SALDO*\n\nEscribe en el formato:\n`USER_ID CANTIDAD`\n\nEjemplo: `123456789 5`\n\n💡 Para ver el ID de un usuario, revisa los depósitos o retiros pendientes.",
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("❌ Cancelar", "admin_menu") }
+  );
+});
+
+// ============ DEPOSIT FLOW ============
 bot.callbackQuery("deposit_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(
@@ -79,6 +361,10 @@ bot.command("depositar_transfer", async (ctx) => {
     "✅ *Solicitud creada*\n\n📋 ID: #" + id + "\n💵 " + amountCup + " CUP → " + fmtBal(credits) + "\n📝 Ref: " + ref + "\n\nTransfiere a:\n📱 " + TRANSFER_PHONE + "\n🏦 " + TRANSFER_CUP_ACCOUNT + "\n\nDespués: /depositado " + id,
     { parse_mode: "Markdown" }
   );
+  // Notificar admins
+  for (const aid of ADMIN_IDS) {
+    try { await bot.api.sendMessage(aid, "📥 *Nuevo depósito pendiente*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 #" + id + " | " + amountCup + " CUP → " + fmtBal(credits) + "\n📝 " + ref, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Ver Panel", "admin_deposits") }); } catch {}
+  }
 });
 
 bot.command("depositar_saldo", async (ctx) => {
@@ -93,15 +379,20 @@ bot.command("depositar_saldo", async (ctx) => {
     "✅ *Solicitud creada*\n\n📋 ID: #" + id + "\n💵 " + amountCup + " CUP → " + fmtBal(credits) + "\n📱 Desde: " + phone + "\n\nEnvía saldo a: " + TRANSFER_PHONE + "\n\nDespués: /depositado " + id,
     { parse_mode: "Markdown" }
   );
+  // Notificar admins
+  for (const aid of ADMIN_IDS) {
+    try { await bot.api.sendMessage(aid, "📥 *Nuevo depósito pendiente (Saldo)*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 #" + id + " | " + amountCup + " CUP → " + fmtBal(credits) + "\n📱 " + phone, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Ver Panel", "admin_deposits") }); } catch {}
+  }
 });
 
 bot.command("depositado", async (ctx) => {
   await ctx.reply("✅ Notificación enviada. Un admin verificará tu depósito.");
   for (const aid of ADMIN_IDS) {
-    try { await bot.api.sendMessage(aid, "📥 *Depósito pendiente*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 Depósito: #" + ctx.match.trim() + "\n\n/pendientes para ver todos.", { parse_mode: "Markdown" }); } catch {}
+    try { await bot.api.sendMessage(aid, "📥 *Depósito notificado*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 #" + ctx.match.trim(), { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Ver Depósitos", "admin_deposits") }); } catch {}
   }
 });
 
+// ============ WITHDRAW FLOW ============
 bot.callbackQuery("withdraw_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
   const bal = getUserBalance(ctx.from.id);
@@ -138,7 +429,9 @@ bot.command("retirar_transfer", async (ctx) => {
   const id = createWithdrawal(ctx.from.id, "transferencia", credits, cup, phone);
   if (!id) { await ctx.reply("❌ Error"); return; }
   await ctx.reply("✅ *Retiro creado*\n\n📋 #" + id + "\n🪙 " + fmtBal(credits) + " → " + cup + " CUP\n📱 → " + phone + "\n\n⏳ Admin lo procesará.", { parse_mode: "Markdown" });
-  for (const aid of ADMIN_IDS) { try { await bot.api.sendMessage(aid, "📤 Retiro pendiente #" + id + "\n👤 " + (ctx.from.username || ctx.from.first_name) + "\n" + fmtBal(credits) + " → " + cup + " CUP → " + phone); } catch {} }
+  for (const aid of ADMIN_IDS) {
+    try { await bot.api.sendMessage(aid, "📤 *Nuevo retiro pendiente*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 #" + id + " | " + fmtBal(credits) + " → " + cup + " CUP → " + phone, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Ver Retiros", "admin_withdrawals") }); } catch {}
+  }
 });
 
 bot.command("retirar_saldo", async (ctx) => {
@@ -151,9 +444,12 @@ bot.command("retirar_saldo", async (ctx) => {
   const id = createWithdrawal(ctx.from.id, "saldo_movil", credits, cup, phone);
   if (!id) { await ctx.reply("❌ Error"); return; }
   await ctx.reply("✅ *Retiro creado*\n\n📋 #" + id + "\n🪙 " + fmtBal(credits) + " → " + cup + " CUP (saldo)\n📱 → " + phone + "\n\n⏳ Admin lo procesará.", { parse_mode: "Markdown" });
-  for (const aid of ADMIN_IDS) { try { await bot.api.sendMessage(aid, "📤 Retiro saldo #" + id + "\n👤 " + (ctx.from.username || ctx.from.first_name) + "\n" + fmtBal(credits) + " → " + cup + " CUP → " + phone); } catch {} }
+  for (const aid of ADMIN_IDS) {
+    try { await bot.api.sendMessage(aid, "📤 *Nuevo retiro pendiente (Saldo)*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 #" + id + " | " + fmtBal(credits) + " → " + cup + " CUP → " + phone, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Ver Retiros", "admin_withdrawals") }); } catch {}
+  }
 });
 
+// ============ BETTING FLOW ============
 bot.callbackQuery("bet_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
   const bal = getUserBalance(ctx.from.id);
@@ -213,9 +509,26 @@ bot.callbackQuery("cancel_bet", async (ctx) => {
   await ctx.editMessageText("❌ Cancelada.", { reply_markup: mainMenu() });
 });
 
+// ============ TEXT INPUT HANDLER ============
 bot.on("message:text", async (ctx) => {
   const state = getUserState(ctx.from.id);
   if (!state) return;
+
+  // Admin adding saldo
+  if (state.state === "admin_addsaldo") {
+    const args = ctx.message.text.trim().split(/\s+/);
+    if (args.length < 2) { await ctx.reply("❌ Usa: USER_ID CANTIDAD\nEjemplo: 123456789 5"); return; }
+    const uid = Number(args[0]), amt = Number(args[1]);
+    if (!uid || !amt || amt <= 0) { await ctx.reply("❌ Parámetros inválidos"); return; }
+    ensureUser(uid);
+    addBalance(uid, amt);
+    clearUserState(ctx.from.id);
+    await ctx.reply("✅ +" + fmtBal(amt) + " al usuario " + uid, { reply_markup: adminMenu() });
+    try { await bot.api.sendMessage(uid, "💰 *Saldo acreditado*\n🪙 +" + fmtBal(amt) + "\n💰 Nuevo saldo: " + fmtBal(getUserBalance(uid)), { parse_mode: "Markdown" }); } catch {}
+    return;
+  }
+
+  // User entering bet stake
   if (state.state === "enter_stake") {
     const stake = Number(ctx.message.text.replace(",", "."));
     if (!stake || stake <= 0) { await ctx.reply("❌ Cantidad inválida. Escribe un número."); return; }
@@ -229,9 +542,14 @@ bot.on("message:text", async (ctx) => {
       "✅ *¡APUESTA REALIZADA!*\n\n⚽ #" + fixtureId + "\n📌 " + betLabel + " @ " + odds + "\n🪙 Apostado: " + fmtBal(stake) + "\n🏆 Posible: " + fmtBal(result.potentialWin) + "\n📋 ID: #" + result.betId,
       { parse_mode: "Markdown", reply_markup: mainMenu() }
     );
+    // Notificar admins
+    for (const aid of ADMIN_IDS) {
+      try { await bot.api.sendMessage(aid, "⚽ *Nueva apuesta*\n👤 " + (ctx.from.username || ctx.from.first_name) + " (ID: " + ctx.from.id + ")\n📋 #" + result.betId + " | " + betLabel + " @ " + odds + " | " + fmtBal(stake) + " → " + fmtBal(result.potentialWin), { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Ver Apuestas", "admin_bets") }); } catch {}
+    }
   }
 });
 
+// ============ BALANCE & HISTORY ============
 bot.callbackQuery("balance", async (ctx) => {
   await ctx.answerCallbackQuery();
   const bal = getUserBalance(ctx.from.id);
@@ -251,14 +569,30 @@ bot.callbackQuery("history", async (ctx) => {
 bot.callbackQuery("help", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(
-    "❓ *AYUDA*\n\n⚽ Apostar → Selecciona partido y apuesta\n📥 Depositar → Transferencia o Saldo Móvil\n📤 Retirar → Transferencia o Saldo Móvil\n\n📝 Comandos:\n/start - Menú\n/depositar_transfer MONTO\n/depositar_saldo MONTO TELÉFONO\n/depositado ID\n/retirar_transfer CRÉDITOS TELÉFONO\n/retirar_saldo CRÉDITOS TELÉFONO\n/saldo - Ver saldo",
+    "❓ *AYUDA*\n\n⚽ Apostar → Selecciona partido y apuesta\n📥 Depositar → Transferencia o Saldo Móvil\n📤 Retirar → Transferencia o Saldo Móvil\n\n📝 Comandos:\n/start - Menú principal\n/depositar_transfer MONTO\n/depositar_saldo MONTO TELÉFONO\n/depositado ID\n/retirar_transfer CRÉDITOS TELÉFONO\n/retirar_saldo CRÉDITOS TELÉFONO\n/saldo - Ver saldo\n/admin - Panel de admin (solo admins)",
     { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }
   );
 });
 
 bot.callbackQuery("back_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText("⚽🎰 *Bot de Apuestas*\n\n💰 Saldo: " + fmtBal(getUserBalance(ctx.from.id)), { parse_mode: "Markdown", reply_markup: mainMenu() });
+  const kb = mainMenu();
+  if (isAdmin(ctx.from.id)) {
+    kb.row().text("🔧 Admin", "admin_menu");
+  }
+  await ctx.editMessageText("⚽🎰 *Bot de Apuestas*\n\n💰 Saldo: " + fmtBal(getUserBalance(ctx.from.id)), { parse_mode: "Markdown", reply_markup: kb });
+});
+
+// ============ TEXT COMMANDS (still available) ============
+bot.command("admin", async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const deps = getPendingDeposits();
+  const wds = getPendingWithdrawals();
+  const bets = getPendingBets();
+  await ctx.reply(
+    "🔧 *PANEL DE ADMIN*\n\n📥 Depósitos: " + deps.length + "\n📤 Retiros: " + wds.length + "\n⏳ Apuestas: " + bets.length,
+    { parse_mode: "Markdown", reply_markup: adminMenu() }
+  );
 });
 
 bot.command("pendientes", async (ctx) => {
@@ -268,7 +602,7 @@ bot.command("pendientes", async (ctx) => {
   if (deps.length) { msg += "📥 DEPÓSITOS:\n"; deps.forEach(d => { msg += "#" + d.id + " | " + d.amount_cup + " CUP → " + fmtBal(d.credits) + " | User:" + d.user_id + "\n  /aprobar_dep " + d.id + " | /rechazar_dep " + d.id + "\n"; }); msg += "\n"; }
   if (wds.length) { msg += "📤 RETIROS:\n"; wds.forEach(w => { msg += "#" + w.id + " | " + fmtBal(w.amount_credits) + " → " + w.amount_cup + " CUP → " + w.destination + "\n  /aprobar_ret " + w.id + " | /rechazar_ret " + w.id + "\n"; }); msg += "\n"; }
   if (!deps.length && !wds.length) msg += "✅ Sin pendientes.";
-  await ctx.reply(msg, { parse_mode: "Markdown" });
+  await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔧 Panel Admin", "admin_menu") });
 });
 
 bot.command("aprobar_dep", async (ctx) => {
@@ -338,14 +672,19 @@ bot.command("addsaldo", async (ctx) => {
   ensureUser(uid);
   addBalance(uid, amt);
   await ctx.reply("✅ +" + fmtBal(amt) + " al usuario " + uid);
+  try { await bot.api.sendMessage(uid, "💰 *Saldo acreditado*\n🪙 +" + fmtBal(amt) + "\n💰 Nuevo saldo: " + fmtBal(getUserBalance(uid)), { parse_mode: "Markdown" }); } catch {}
 });
 
 bot.command("saldo", async (ctx) => {
-  await ctx.reply("💰 Saldo: " + fmtBal(getUserBalance(ctx.from.id)) + "\n💵 = " + creditsToCup(getUserBalance(ctx.from.id)) + " CUP", { reply_markup: mainMenu() });
+  const bal = getUserBalance(ctx.from.id);
+  const kb = mainMenu();
+  if (isAdmin(ctx.from.id)) kb.row().text("🔧 Admin", "admin_menu");
+  await ctx.reply("💰 Saldo: " + fmtBal(bal) + "\n💵 = " + creditsToCup(bal) + " CUP", { reply_markup: kb });
 });
 
 bot.catch((err) => console.error("Bot error:", err));
 
+// ============ EXPRESS + WEBHOOK ============
 const app = express();
 app.use(express.json());
 
