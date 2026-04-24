@@ -261,7 +261,6 @@ bot.callbackQuery("back_menu", async (ctx) => {
   await ctx.editMessageText("⚽🎰 *Bot de Apuestas*\n\n💰 Saldo: " + fmtBal(getUserBalance(ctx.from.id)), { parse_mode: "Markdown", reply_markup: mainMenu() });
 });
 
-// ============ ADMIN ============
 bot.command("pendientes", async (ctx) => {
   if (!isAdmin(ctx.from.id)) { await ctx.reply("❌ Solo admins"); return; }
   const deps = getPendingDeposits(), wds = getPendingWithdrawals();
@@ -347,7 +346,6 @@ bot.command("saldo", async (ctx) => {
 
 bot.catch((err) => console.error("Bot error:", err));
 
-// ============ EXPRESS + WEBHOOK ============
 const app = express();
 app.use(express.json());
 
@@ -367,6 +365,7 @@ app.post("/webhook", async function(req, res) {
 
 app.listen(PORT, async function() {
   console.log("🚀 Server on port " + PORT);
+  await bot.init();
   if (RENDER_URL) {
     try {
       const url = RENDER_URL + "/webhook";
