@@ -3,73 +3,37 @@ import path from "path";
 import fs from "fs";
 
 const dataDir = path.join(process.cwd(), "data");
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(dataDir)) { fs.mkdirSync(dataDir, { recursive: true }); }
 
 const db = new Database(path.join(dataDir, "bot.db"));
-
 db.pragma("journal_mode = WAL");
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER UNIQUE NOT NULL,
-    username TEXT DEFAULT '',
-    first_name TEXT DEFAULT '',
-    balance REAL DEFAULT 0,
-    is_admin INTEGER DEFAULT 0,
-    is_banned INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS deposits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER NOT NULL,
-    method TEXT NOT NULL,
-    amount_cup REAL NOT NULL,
-    amount_credit REAL NOT NULL,
-    status TEXT DEFAULT 'pending',
-    phone_number TEXT DEFAULT '',
-    ref TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    approved_by INTEGER DEFAULT NULL,
-    approved_at DATETIME DEFAULT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS withdrawals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER NOT NULL,
-    method TEXT NOT NULL,
-    amount_credit REAL NOT NULL,
-    amount_cup REAL NOT NULL,
-    destination TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    processed_by INTEGER DEFAULT NULL,
-    processed_at DATETIME DEFAULT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS bets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER NOT NULL,
-    fixture_id INTEGER NOT NULL,
-    league_name TEXT DEFAULT '',
-    home_team TEXT NOT NULL,
-    away_team TEXT NOT NULL,
-    bet_selection TEXT NOT NULL,
-    odds REAL NOT NULL,
-    amount REAL NOT NULL,
-    potential_win REAL NOT NULL,
-    status TEXT DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    settled_at DATETIME DEFAULT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    telegram_id INTEGER PRIMARY KEY,
-    fixture_id INTEGER DEFAULT NULL,
-    selection TEXT DEFAULT '',
-    odds REAL DEFAULT 0
-  );
+  CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT DEFAULT '', first_name TEXT DEFAULT '', balance REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+  CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL CHECK(method IN ('transferencia', 'saldo_movil')), amount_cup REAL NOT NULL, credits REAL NOT NULL, reference TEXT DEFAULT '', phone TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')), admin_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME);
+  CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL CHECK(method IN ('transferencia', 'saldo_movil')), amount_credits REAL NOT NULL, amount_cup REAL NOT NULL, destination TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')), admin_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME);
+  CREATE TABLE IF NOT EXISTS bets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, fixture_id INTEGER NOT NULL, fixture_name TEXT NOT NULL, bet_type TEXT NOT NULL, bet_label TEXT NOT NULL, odds REAL NOT NULL, stake REAL NOT NULL, potential_win REAL NOT NULL, status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'won', 'lost', 'void')), result TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, settled_at DATETIME);
+  CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT DEFAULT '{}', updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 `);
 
+export function ensureUser(userId: number, username?: string, firstName?: string) { const e = db.prepare("SELECT id FROM users WHERE id = ?").get(userId); if (!e) db.prepare("INSERT INTO users (id, username, first_name) VALUES (?, ?, ?)").run(userId, username || "", firstName || ""); return db.prepare("SELECT * FROM users WHERE id = ?").get(userId); }
+export function getUserBalance(userId: number): number { const r = db.prepare("SELECT balance FROM users WHERE id = ?").get(userId) as { balance: number } | undefined; return r?.balance ?? 0; }
+export function addBalance(userId: number, amount: number) { db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(amount, userId); }
+export function subtractBalance(userId: number, amount: number): boolean { if (getUserBalance(userId) < amount) return false; db.prepare("UPDATE users SET balance = balance - ? WHERE id = ?").run(amount, userId); return true; }
+export function setUserState(userId: number, state: string, data: Record<string, any> = {}) { db.prepare("INSERT INTO user_states (user_id, state, data, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(user_id) DO UPDATE SET state = ?, data = ?, updated_at = CURRENT_TIMESTAMP").run(userId, state, JSON.stringify(data), state, JSON.stringify(data)); }
+export function getUserState(userId: number): { state: string; data: Record<string, any> } | null { const r = db.prepare("SELECT state, data FROM user_states WHERE user_id = ?").get(userId) as any; if (!r) return null; return { state: r.state, data: JSON.parse(r.data || "{}") }; }
+export function clearUserState(userId: number) { db.prepare("DELETE FROM user_states WHERE user_id = ?").run(userId); }
+export function createDeposit(userId: number, method: string, amountCup: number, credits: number, reference: string, phone: string): number { return Number(db.prepare("INSERT INTO deposits (user_id, method, amount_cup, credits, reference, phone) VALUES (?, ?, ?, ?, ?, ?)").run(userId, method, amountCup, credits, reference, phone).lastInsertRowid); }
+export function getPendingDeposits() { return db.prepare("SELECT * FROM deposits WHERE status = 'pending' ORDER BY created_at DESC").all(); }
+export function approveDeposit(depositId: number, adminId: number): any | null { const d = db.prepare("SELECT * FROM deposits WHERE id = ?").get(depositId) as any; if (!d || d.status !== "pending") return null; db.prepare("UPDATE deposits SET status = 'approved', admin_id = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(adminId, depositId); addBalance(d.user_id, d.credits); return d; }
+export function rejectDeposit(depositId: number, adminId: number): any | null { const d = db.prepare("SELECT * FROM deposits WHERE id = ?").get(depositId) as any; if (!d || d.status !== "pending") return null; db.prepare("UPDATE deposits SET status = 'rejected', admin_id = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(adminId, depositId); return d; }
+export function createWithdrawal(userId: number, method: string, amountCredits: number, amountCup: number, destination: string): number | null { if (!subtractBalance(userId, amountCredits)) return null; return Number(db.prepare("INSERT INTO withdrawals (user_id, method, amount_credits, amount_cup, destination) VALUES (?, ?, ?, ?, ?)").run(userId, method, amountCredits, amountCup, destination).lastInsertRowid); }
+export function getPendingWithdrawals() { return db.prepare("SELECT * FROM withdrawals WHERE status = 'pending' ORDER BY created_at DESC").all(); }
+export function approveWithdrawal(withdrawalId: number, adminId: number): any | null { const w = db.prepare("SELECT * FROM withdrawals WHERE id = ?").get(withdrawalId) as any; if (!w || w.status !== "pending") return null; db.prepare("UPDATE withdrawals SET status = 'approved', admin_id = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(adminId, withdrawalId); return w; }
+export function rejectWithdrawal(withdrawalId: number, adminId: number): any | null { const w = db.prepare("SELECT * FROM withdrawals WHERE id = ?").get(withdrawalId) as any; if (!w || w.status !== "pending") return null; db.prepare("UPDATE withdrawals SET status = 'rejected', admin_id = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?").run(adminId, withdrawalId); addBalance(w.user_id, w.amount_credits); return w; }
+export function createBet(userId: number, fixtureId: number, fixtureName: string, betType: string, betLabel: string, odds: number, stake: number): { betId: number; potentialWin: number } | null { if (!subtractBalance(userId, stake)) return null; const pw = Math.round(stake * odds * 100) / 100; return { betId: Number(db.prepare("INSERT INTO bets (user_id, fixture_id, fixture_name, bet_type, bet_label, odds, stake, potential_win) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(userId, fixtureId, fixtureName, betType, betLabel, odds, stake, pw).lastInsertRowid), potentialWin: pw }; }
+export function getPendingBets() { return db.prepare("SELECT * FROM bets WHERE status = 'pending' ORDER BY created_at DESC").all(); }
+export function settleBet(betId: number, status: "won" | "lost" | "void", result: string): any | null { const b = db.prepare("SELECT * FROM bets WHERE id = ?").get(betId) as any; if (!b || b.status !== "pending") return null; db.prepare("UPDATE bets SET status = ?, result = ?, settled_at = CURRENT_TIMESTAMP WHERE id = ?").run(status, result, betId); if (status === "won") addBalance(b.user_id, b.potential_win); else if (status === "void") addBalance(b.user_id, b.stake); return b; }
+export function getUserBets(userId: number, limit = 10) { return db.prepare("SELECT * FROM bets WHERE user_id = ? ORDER BY created_at DESC LIMIT ?").all(userId, limit); }
+export function getBetById(betId: number) { return db.prepare("SELECT * FROM bets WHERE id = ?").get(betId); }
 export default db;
