@@ -1,15 +1,16 @@
 {
   "name": "betting-bot",
-  "version": "1.0.0",
-  "description": "Telegram Sports Betting Bot",
+  "version": "2.0.0",
+  "description": "Bot de Apuestas Deportivas",
+  "main": "src/index.js",
   "scripts": {
     "start": "tsx src/index.js",
     "build": "echo 'No build needed'"
   },
   "dependencies": {
-    "grammy": "^1.21.0",
+    "grammy": "^1.21.1",
     "express": "^4.18.2",
     "better-sqlite3": "^11.0.0",
-    "tsx": "^4.7.0"
+    "tsx": "^4.16.0"
   }
 }
