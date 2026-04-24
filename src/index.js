@@ -1,614 +1,381 @@
-import express from "express";
 import { Bot, InlineKeyboard } from "grammy";
-import db from "./database.js";
-import { getTodayFixtures, getFixtureOdds } from "./sports.js";
+import express from "express";
+import { setApiKey, getTodayFixtures, getFixtureOdds, formatFixture } from "./sports";
 import {
-  ensureUser,
-  getBalance,
-  createDeposit,
-  confirmDeposit,
-  approveDeposit,
-  rejectDeposit,
-  createWithdrawal,
-  approveWithdrawal,
-} from "./payments.js";
-import {
-  saveSelection,
-  getSelection,
-  clearSelection,
-  placeBet,
-  getBetHistory,
-  settleBet,
-} from "./betting.js";
+  ensureUser, getUserBalance, addBalance,
+  setUserState, getUserState, clearUserState,
+  createDeposit, getPendingDeposits, approveDeposit, rejectDeposit,
+  createWithdrawal, getPendingWithdrawals, approveWithdrawal, rejectWithdrawal,
+  createBet, settleBet, getUserBets,
+} from "./database";
 
-// ============ CONFIGURACIÓN ============
-const TOKEN = process.env.BOT_TOKEN || "";
-const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(Number);
-const PORT = process.env.PORT || 3000;
+const BOT_TOKEN = process.env.BOT_TOKEN || "";
 const RENDER_URL = process.env.RENDER_URL || "";
-const MIN_DEPOSIT = parseInt(process.env.MIN_DEPOSIT || "200");
+const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY || "";
+const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map(Number).filter(Boolean);
+const TRANSFER_PHONE = process.env.TRANSFER_PHONE || "";
+const TRANSFER_CUP_ACCOUNT = process.env.TRANSFER_CUP_ACCOUNT || "";
+const MIN_DEPOSIT_CUP = Number(process.env.MIN_DEPOSIT_CUP) || 100;
+const MIN_DEPOSIT_SALDO = Number(process.env.MIN_DEPOSIT_SALDO) || 50;
+const CUP_TO_CREDIT = Number(process.env.CUP_TO_CREDIT) || 0.004;
+const PORT = Number(process.env.PORT) || 3000;
 
-// ============ EXPRESS (servidor web para Render) ============
-const app = express();
-app.use(express.json());
+if (!BOT_TOKEN) { console.error("ERROR: BOT_TOKEN required!"); process.exit(1); }
+setApiKey(API_FOOTBALL_KEY);
 
-// Health check - Render necesita esto
-app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    bot: "running",
-    uptime: process.uptime(),
-    time: new Date().toISOString(),
-  });
-});
+const bot = new Bot(BOT_TOKEN);
 
-// Webhook endpoint para Telegram
-app.post(`/webhook/${TOKEN}`, async (req, res) => {
-  await bot.handleUpdate(req.body);
-  res.sendStatus(200);
-});
+function isAdmin(userId: number): boolean { return ADMIN_IDS.includes(userId); }
+function fmtBal(credits: number): string { return `${credits.toFixed(2)} créditos`; }
+function cupToCredits(cup: number): number { return Math.round(cup * CUP_TO_CREDIT * 100) / 100; }
+function creditsToCup(credits: number): number { return Math.round(credits / CUP_TO_CREDIT * 100) / 100; }
 
-app.listen(PORT, () => {
-  console.log(`🌐 Servidor web en puerto ${PORT}`);
-});
-
-// ============ BOT DE TELEGRAM ============
-const bot = new Bot(TOKEN);
-
-// Configurar webhook si hay URL de Render
-if (RENDER_URL) {
-  bot.api.setWebhook(`${RENDER_URL}/webhook/${TOKEN}`).then(() => {
-    console.log("✅ Webhook configurado");
-  }).catch((err) => {
-    console.error("❌ Error configurando webhook:", err);
-  });
+function mainMenu(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("⚽ Apostar", "bet_menu").text("💰 Saldo", "balance").row()
+    .text("📥 Depositar", "deposit_menu").text("📤 Retirar", "withdraw_menu").row()
+    .text("📊 Mis Apuestas", "history").text("❓ Ayuda", "help");
 }
 
-// ============ COMANDO /start ============
 bot.command("start", async (ctx) => {
-  const userId = ctx.from.id;
-  const username = ctx.from.username || "";
-  const firstName = ctx.from.first_name || "";
-
-  ensureUser(userId, username, firstName);
-  const balance = getBalance(userId);
-
-  const keyboard = new InlineKeyboard()
-    .text("💰 Depositar", "deposit")
-    .text("⚽ Apostar", "bet_menu")
-    .row()
-    .text("📊 Balance", "balance")
-    .text("💸 Retirar", "withdraw")
-    .row()
-    .text("📋 Historial", "history")
-    .text("❓ Ayuda", "help");
-
+  ensureUser(ctx.from!.id, ctx.from!.username, ctx.from!.first_name);
   await ctx.reply(
-    `👋 *Bienvenido al Bot de Apuestas!*\n\n` +
-      `👤 ${firstName}\n` +
-      `💵 Saldo: *${balance} créditos*\n\n` +
-      `Selecciona una opción:`,
-    { parse_mode: "Markdown", reply_markup: keyboard }
+    `¡Hola ${ctx.from!.first_name}! 👋\n\nBot de Apuestas Deportivas ⚽🎰\n\n💰 Tu saldo: ${fmtBal(getUserBalance(ctx.from!.id))}`,
+    { reply_markup: mainMenu() }
   );
 });
 
-// ============ DEPÓSITOS ============
-bot.callbackQuery("deposit", async (ctx) => {
-  const keyboard = new InlineKeyboard()
-    .text("📱 Saldo Móvil", "deposit_saldo")
-    .text("🏦 Transferencia", "deposit_transfer")
-    .row()
-    .text("⬅️ Volver", "back_menu");
-
-  await ctx.reply("💰 *DEPÓSITOS*\n\nSelecciona el método:", {
-    parse_mode: "Markdown",
-    reply_markup: keyboard,
-  });
+bot.callbackQuery("deposit_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
-});
-
-bot.callbackQuery("deposit_saldo", async (ctx) => {
-  await ctx.reply(
-    `📱 *DEPÓSITO POR SALDO MÓVIL*\n\n` +
-      `Escribe:\n/depositar_saldo CANTIDAD\n\n` +
-      `Ejemplo: /depositar_saldo 500\n\n` +
-      `💰 Mínimo: ${MIN_DEPOSIT} CUP`,
-    { parse_mode: "Markdown" }
+  await ctx.editMessageText(
+    "📥 *DEPOSITAR SALDO*\n\n🏦 Transferencia: mín " + MIN_DEPOSIT_CUP + " CUP\n📱 Saldo Móvil: mín " + MIN_DEPOSIT_SALDO + " CUP\n\n💰 Tu saldo: " + fmtBal(getUserBalance(ctx.from!.id)),
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🏦 Transferencia", "dep_transfer").row().text("📱 Saldo Móvil", "dep_saldo").row().text("🔙 Menú", "back_menu") }
   );
-  await ctx.answerCallbackQuery();
 });
 
-bot.callbackQuery("deposit_transfer", async (ctx) => {
-  await ctx.reply(
-    `🏦 *DEPÓSITO POR TRANSFERENCIA*\n\n` +
-      `Escribe:\n/depositar_transfer CANTIDAD\n\n` +
-      `Ejemplo: /depositar_transfer 500\n\n` +
-      `💰 Mínimo: ${MIN_DEPOSIT} CUP`,
-    { parse_mode: "Markdown" }
+bot.callbackQuery("dep_transfer", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(
+    "📥 *DEPÓSITO POR TRANSFERENCIA*\n\nUsa:\n`/depositar_transfer MONTO`\n\nEj: `/depositar_transfer 500`\n\nMínimo: " + MIN_DEPOSIT_CUP + " CUP\n\n📱 Teléfono: " + TRANSFER_PHONE + "\n🏦 Cuenta: " + TRANSFER_CUP_ACCOUNT + "\n\n⚠️ Después de transferir usa /depositado ID",
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Atrás", "deposit_menu") }
   );
-  await ctx.answerCallbackQuery();
 });
 
-bot.command("depositar_saldo", async (ctx) => {
-  const amount = parseFloat(ctx.match || "0");
-  if (!amount || amount <= 0) {
-    await ctx.reply("❌ Usa: /depositar_saldo CANTIDAD\n\nEjemplo: /depositar_saldo 500");
-    return;
-  }
-  const result = createDeposit(ctx.from.id, "saldo_movil", amount);
-  await ctx.reply(result.message, { parse_mode: "Markdown" });
+bot.callbackQuery("dep_saldo", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(
+    "📥 *DEPÓSITO POR SALDO MÓVIL*\n\nUsa:\n`/depositar_saldo MONTO TELÉFONO`\n\nEj: `/depositar_saldo 100 55551234`\n\nMínimo: " + MIN_DEPOSIT_SALDO + " CUP\n\nEnviar saldo a: " + TRANSFER_PHONE + "\n\n⚠️ Después usa /depositado ID",
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Atrás", "deposit_menu") }
+  );
 });
 
 bot.command("depositar_transfer", async (ctx) => {
-  const amount = parseFloat(ctx.match || "0");
-  if (!amount || amount <= 0) {
-    await ctx.reply("❌ Usa: /depositar_transfer CANTIDAD\n\nEjemplo: /depositar_transfer 500");
-    return;
-  }
-  const result = createDeposit(ctx.from.id, "transferencia", amount);
-  await ctx.reply(result.message, { parse_mode: "Markdown" });
+  const amountCup = Number(ctx.match?.trim());
+  if (!amountCup || amountCup < MIN_DEPOSIT_CUP) { await ctx.reply(`❌ Mínimo ${MIN_DEPOSIT_CUP} CUP`); return; }
+  const credits = cupToCredits(amountCup);
+  const ref = `TXF-${Date.now()}-${ctx.from!.id}`;
+  const id = createDeposit(ctx.from!.id, "transferencia", amountCup, credits, ref, "");
+  await ctx.reply(
+    `✅ *Solicitud creada*\n\n📋 ID: #${id}\n💵 ${amountCup} CUP → ${fmtBal(credits)}\n📝 Ref: ${ref}\n\nTransfiere a:\n📱 ${TRANSFER_PHONE}\n🏦 ${TRANSFER_CUP_ACCOUNT}\n\nDespués: /depositado ${id}`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+bot.command("depositar_saldo", async (ctx) => {
+  const args = ctx.match?.trim().split(/\s+/);
+  if (!args || args.length < 2) { await ctx.reply("❌ Usa: /depositar_saldo MONTO TELÉFONO"); return; }
+  const amountCup = Number(args[0]), phone = args[1];
+  if (!amountCup || amountCup < MIN_DEPOSIT_SALDO) { await ctx.reply(`❌ Mínimo ${MIN_DEPOSIT_SALDO} CUP`); return; }
+  const credits = cupToCredits(amountCup);
+  const ref = `SM-${Date.now()}-${ctx.from!.id}`;
+  const id = createDeposit(ctx.from!.id, "saldo_movil", amountCup, credits, ref, phone);
+  await ctx.reply(
+    `✅ *Solicitud creada*\n\n📋 ID: #${id}\n💵 ${amountCup} CUP → ${fmtBal(credits)}\n📱 Desde: ${phone}\n\nEnvía saldo a: ${TRANSFER_PHONE}\n\nDespués: /depositado ${id}`,
+    { parse_mode: "Markdown" }
+  );
 });
 
 bot.command("depositado", async (ctx) => {
-  const ref = ctx.match?.trim() || "";
-  if (!ref) {
-    await ctx.reply("❌ Usa: /depositado REFERENCIA\n\nEjemplo: /depositado ABC123");
-    return;
-  }
-
-  const result = confirmDeposit(ctx.from.id, ref);
-  await ctx.reply(result.message, { parse_mode: "Markdown" });
-
-  if (result.success && result.depositId) {
-    const deposit = db.prepare("SELECT * FROM deposits WHERE id = ?").get(result.depositId);
-    for (const adminId of ADMIN_IDS) {
-      try {
-        await bot.api.sendMessage(
-          adminId,
-          `🔔 *DEPÓSITO PENDIENTE*\n\n` +
-            `👤 ${ctx.from.first_name} (@${ctx.from.username})\n` +
-            `📱 ID: ${ctx.from.id}\n` +
-            `💵 ${deposit.amount_cup} CUP → ${deposit.amount_credit} créditos\n` +
-            `📋 Método: ${deposit.method === "saldo_movil" ? "Saldo Móvil" : "Transferencia"}\n` +
-            `🔑 Ref: ${ref}\n\n` +
-            `✅ /aprobar ${deposit.id}\n` +
-            `❌ /rechazar ${deposit.id}`,
-          { parse_mode: "Markdown" }
-        );
-      } catch (e) {
-        console.error("Error notifying admin:", e);
-      }
-    }
+  await ctx.reply("✅ Notificación enviada. Un admin verificará tu depósito.");
+  for (const aid of ADMIN_IDS) {
+    try { await bot.api.sendMessage(aid, `📥 *Depósito pendiente*\n👤 ${ctx.from!.username || ctx.from!.first_name} (ID: ${ctx.from!.id})\n📋 Depósito: #${ctx.match?.trim()}\n\n/pendientes para ver todos.`, { parse_mode: "Markdown" }); } catch {}
   }
 });
 
-// ============ ADMIN: Aprobar/Rechazar ============
-bot.command("aprobar", async (ctx) => {
-  if (!ADMIN_IDS.includes(ctx.from.id)) {
-    await ctx.reply("❌ No tienes permisos de admin");
-    return;
-  }
-  const id = parseInt(ctx.match || "0");
-  const result = approveDeposit(id, ctx.from.id);
-
-  if (result.success) {
-    await ctx.reply(result.message);
-    try {
-      await bot.api.sendMessage(
-        result.telegramId,
-        `✅ *¡Depósito aprobado!*\n\n+${result.amount} créditos\nNuevo saldo: ${result.newBalance} créditos`,
-        { parse_mode: "Markdown" }
-      );
-    } catch (e) {}
-  } else {
-    await ctx.reply(result.message);
-  }
-});
-
-bot.command("rechazar", async (ctx) => {
-  if (!ADMIN_IDS.includes(ctx.from.id)) {
-    await ctx.reply("❌ No tienes permisos de admin");
-    return;
-  }
-  const id = parseInt(ctx.match || "0");
-  const result = rejectDeposit(id, ctx.from.id);
-
-  if (result.success) {
-    await ctx.reply(result.message);
-    try {
-      await bot.api.sendMessage(
-        result.telegramId,
-        `❌ Tu depósito #${id} fue rechazado. Contacta al admin.`
-      );
-    } catch (e) {}
-  } else {
-    await ctx.reply(result.message);
-  }
-});
-
-// ============ BALANCE ============
-bot.callbackQuery("balance", async (ctx) => {
-  const balance = getBalance(ctx.from.id);
-  await ctx.reply(
-    `📊 *TU BALANCE*\n\n💵 Créditos: *${balance}*\n💰 Equivale a: *${balance} CUP*`,
-    { parse_mode: "Markdown" }
+bot.callbackQuery("withdraw_menu", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const bal = getUserBalance(ctx.from!.id);
+  if (bal <= 0) { await ctx.editMessageText("📤 *RETIRAR*\n\n❌ Sin saldo suficiente.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }); return; }
+  await ctx.editMessageText(
+    `📤 *RETIRAR SALDO*\n\n💰 Saldo: ${fmtBal(bal)} (= ${creditsToCup(bal)} CUP)`,
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🏦 Transferencia", "wd_transfer").row().text("📱 Saldo Móvil", "wd_saldo").row().text("🔙 Menú", "back_menu") }
   );
-  await ctx.answerCallbackQuery();
 });
 
-// ============ APUESTAS ============
-bot.callbackQuery("bet_menu", async (ctx) => {
-  await ctx.reply("⏳ Buscando partidos de hoy...");
-  try {
-    const fixtures = await getTodayFixtures();
-    if (fixtures.length === 0) {
-      await ctx.reply("❌ No hay partidos disponibles ahora. Intenta más tarde.");
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    const keyboard = new InlineKeyboard();
-    const max = Math.min(fixtures.length, 8);
-
-    for (let i = 0; i < max; i++) {
-      const f = fixtures[i];
-      const text = `${f.teams.home.name} vs ${f.teams.away.name}`.substring(0, 40);
-      keyboard.text(`⚽ ${text}`, `fix_${f.fixture.id}_${i}`);
-      keyboard.row();
-    }
-    keyboard.text("🔄 Actualizar", "bet_menu").row();
-    keyboard.text("⬅️ Volver", "back_menu");
-
-    await ctx.reply(
-      `⚽ *PARTIDOS DE HOY* (${fixtures.length} disponibles)\n\nSelecciona:`,
-      { parse_mode: "Markdown", reply_markup: keyboard }
-    );
-  } catch (error) {
-    await ctx.reply("❌ Error al cargar partidos. Intenta más tarde.");
-  }
+bot.callbackQuery("wd_transfer", async (ctx) => {
   await ctx.answerCallbackQuery();
-});
-
-// Seleccionar partido
-bot.callbackQuery(/^fix_(\d+)_(\d+)$/, async (ctx) => {
-  const fixtureId = parseInt(ctx.match[1]);
-  const fixtureIndex = parseInt(ctx.match[2]);
-
-  await ctx.reply("⏳ Cargando cuotas...");
-
-  try {
-    const fixtures = await getTodayFixtures();
-    const fixture = fixtures[fixtureIndex];
-    if (!fixture) {
-      await ctx.reply("❌ Partido no encontrado");
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    const odds = await getFixtureOdds(fixtureId);
-    if (!odds) {
-      await ctx.reply("❌ Cuotas no disponibles para este partido");
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    const home = fixture.teams.home.name;
-    const away = fixture.teams.away.name;
-    const league = fixture.league.name;
-    const balance = getBalance(ctx.from.id);
-
-    const keyboard = new InlineKeyboard()
-      .text(`🏠 ${home} @ ${odds.home}`, `sel_${fixtureId}_${fixtureIndex}_home_${odds.home}`)
-      .row()
-      .text(`🤝 Empate @ ${odds.draw}`, `sel_${fixtureId}_${fixtureIndex}_draw_${odds.draw}`)
-      .row()
-      .text(`✈️ ${away} @ ${odds.away}`, `sel_${fixtureId}_${fixtureIndex}_away_${odds.away}`)
-      .row()
-      .text("⬅️ Volver", "bet_menu");
-
-    await ctx.reply(
-      `⚽ *${home} vs ${away}*\n🏆 ${league}\n\n` +
-        `📊 *CUOTAS:*\n` +
-        `🏠 ${home}: *${odds.home}*\n` +
-        `🤝 Empate: *${odds.draw}*\n` +
-        `✈️ ${away}: *${odds.away}*\n\n` +
-        `💵 Tu saldo: *${balance} créditos*\n\n` +
-        `Selecciona tu apuesta:`,
-      { parse_mode: "Markdown", reply_markup: keyboard }
-    );
-  } catch (error) {
-    await ctx.reply("❌ Error al cargar cuotas");
-  }
-  await ctx.answerCallbackQuery();
-});
-
-// Seleccionar apuesta
-bot.callbackQuery(/^sel_(\d+)_(\d+)_(home|draw|away)_([\d.]+)$/, async (ctx) => {
-  const fixtureId = parseInt(ctx.match[1]);
-  const fixtureIndex = parseInt(ctx.match[2]);
-  const selection = ctx.match[3];
-  const odds = parseFloat(ctx.match[4]);
-
-  const fixtures = await getTodayFixtures();
-  const fixture = fixtures[fixtureIndex];
-  if (!fixture) {
-    await ctx.reply("❌ Error");
-    await ctx.answerCallbackQuery();
-    return;
-  }
-
-  // Guardar selección
-  saveSelection(ctx.from.id, fixtureId, selection, odds);
-  // Guardar nombres de equipos también (extendemos sessions)
-  const sel = getSelection(ctx.from.id);
-
-  const selectionText =
-    selection === "home"
-      ? `🏠 ${fixture.teams.home.name}`
-      : selection === "draw"
-      ? "🤝 Empate"
-      : `✈️ ${fixture.teams.away.name}`;
-
-  const balance = getBalance(ctx.from.id);
-
-  await ctx.reply(
-    `✅ *Selección: ${selectionText}*\n` +
-      `📊 Cuota: *${odds}*\n` +
-      `⚽ ${fixture.teams.home.name} vs ${fixture.teams.away.name}\n\n` +
-      `💵 Tu saldo: *${balance} créditos*\n\n` +
-      `Para apostar, escribe:\n/apostar CANTIDAD\n\n` +
-      `Ejemplo: /apostar 100`,
-    { parse_mode: "Markdown" }
+  await ctx.editMessageText(
+    "📤 *RETIRO POR TRANSFERENCIA*\n\n`/retirar_transfer CRÉDITOS TELÉFONO`\n\nEj: `/retirar_transfer 2 55551234`",
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Atrás", "withdraw_menu") }
   );
+});
+
+bot.callbackQuery("wd_saldo", async (ctx) => {
   await ctx.answerCallbackQuery();
-});
-
-bot.command("apostar", async (ctx) => {
-  const amount = parseFloat(ctx.match || "0");
-  if (!amount || amount <= 0) {
-    await ctx.reply("❌ Usa: /apostar CANTIDAD\n\nEjemplo: /apostar 100");
-    return;
-  }
-
-  // Actualizar datos de la sesión con nombres de equipos
-  const session = getSelection(ctx.from.id);
-  if (session && session.fixture_id) {
-    try {
-      const fixtures = await getTodayFixtures();
-      const fixture = fixtures.find((f) => f.fixture.id === session.fixture_id);
-      if (fixture) {
-        db.prepare(
-          "UPDATE sessions SET league_name = ?, home_team = ?, away_team = ? WHERE telegram_id = ?"
-        ).run(fixture.league.name, fixture.teams.home.name, fixture.teams.away.name, ctx.from.id);
-      }
-    } catch (e) {}
-  }
-
-  const result = placeBet(ctx.from.id, amount);
-  await ctx.reply(result.message, { parse_mode: "Markdown" });
-});
-
-// ============ RETIROS ============
-bot.callbackQuery("withdraw", async (ctx) => {
-  await ctx.reply(
-    `💸 *RETIROS*\n\n` +
-      `Por saldo móvil:\n/retirar_saldo MONTO TELÉFONO\n\n` +
-      `Por transferencia:\n/retirar_transfer MONTO CUENTA\n\n` +
-      `Ejemplos:\n` +
-      `/retirar_saldo 500 53123456\n` +
-      `/retirar_transfer 1000 9224XXXXXXXX\n\n` +
-      `💰 Mínimo: ${MIN_DEPOSIT} créditos\n⏳ Máximo 24 horas`,
-    { parse_mode: "Markdown" }
+  await ctx.editMessageText(
+    "📤 *RETIRO POR SALDO MÓVIL*\n\n`/retirar_saldo CRÉDITOS TELÉFONO`\n\nEj: `/retirar_saldo 1 55551234`",
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Atrás", "withdraw_menu") }
   );
-  await ctx.answerCallbackQuery();
-});
-
-bot.command("retirar_saldo", async (ctx) => {
-  const parts = (ctx.match || "").trim().split(" ");
-  const amount = parseFloat(parts[0] || "0");
-  const phone = parts[1] || "";
-  if (!amount || !phone) {
-    await ctx.reply("❌ Usa: /retirar_saldo MONTO TELÉFONO\n\nEjemplo: /retirar_saldo 500 53123456");
-    return;
-  }
-  const result = createWithdrawal(ctx.from.id, "saldo_movil", amount, phone);
-  await ctx.reply(result.message, { parse_mode: "Markdown" });
 });
 
 bot.command("retirar_transfer", async (ctx) => {
-  const parts = (ctx.match || "").trim().split(" ");
-  const amount = parseFloat(parts[0] || "0");
-  const account = parts[1] || "";
-  if (!amount || !account) {
-    await ctx.reply("❌ Usa: /retirar_transfer MONTO CUENTA\n\nEjemplo: /retirar_transfer 1000 9224XXXXXXXX");
-    return;
-  }
-  const result = createWithdrawal(ctx.from.id, "transferencia", amount, account);
-  await ctx.reply(result.message, { parse_mode: "Markdown" });
+  const args = ctx.match?.trim().split(/\s+/);
+  if (!args || args.length < 2) { await ctx.reply("❌ Usa: /retirar_transfer CRÉDITOS TELÉFONO"); return; }
+  const credits = Number(args[0]), phone = args[1], bal = getUserBalance(ctx.from!.id);
+  if (!credits || credits <= 0) { await ctx.reply("❌ Cantidad inválida"); return; }
+  if (credits > bal) { await ctx.reply(`❌ Saldo insuficiente: ${fmtBal(bal)}`); return; }
+  const cup = creditsToCup(credits);
+  const id = createWithdrawal(ctx.from!.id, "transferencia", credits, cup, phone);
+  if (!id) { await ctx.reply("❌ Error"); return; }
+  await ctx.reply(`✅ *Retiro creado*\n\n📋 #${id}\n🪙 ${fmtBal(credits)} → ${cup} CUP\n📱 → ${phone}\n\n⏳ Admin lo procesará.`, { parse_mode: "Markdown" });
+  for (const aid of ADMIN_IDS) { try { await bot.api.sendMessage(aid, `📤 Retiro pendiente #${id}\n👤 ${ctx.from!.username || ctx.from!.first_name}\n${fmtBal(credits)} → ${cup} CUP → ${phone}`, {}); } catch {} }
 });
 
-// ============ HISTORIAL ============
-bot.callbackQuery("history", async (ctx) => {
-  const bets = getBetHistory(ctx.from.id, 5);
-  if (bets.length === 0) {
-    await ctx.reply("📋 No tienes apuestas todavía. ¡Empieza con ⚽ Apostar!");
-    await ctx.answerCallbackQuery();
-    return;
-  }
+bot.command("retirar_saldo", async (ctx) => {
+  const args = ctx.match?.trim().split(/\s+/);
+  if (!args || args.length < 2) { await ctx.reply("❌ Usa: /retirar_saldo CRÉDITOS TELÉFONO"); return; }
+  const credits = Number(args[0]), phone = args[1], bal = getUserBalance(ctx.from!.id);
+  if (!credits || credits <= 0) { await ctx.reply("❌ Cantidad inválida"); return; }
+  if (credits > bal) { await ctx.reply(`❌ Saldo insuficiente: ${fmtBal(bal)}`); return; }
+  const cup = creditsToCup(credits);
+  const id = createWithdrawal(ctx.from!.id, "saldo_movil", credits, cup, phone);
+  if (!id) { await ctx.reply("❌ Error"); return; }
+  await ctx.reply(`✅ *Retiro creado*\n\n📋 #${id}\n🪙 ${fmtBal(credits)} → ${cup} CUP (saldo)\n📱 → ${phone}\n\n⏳ Admin lo procesará.`, { parse_mode: "Markdown" });
+  for (const aid of ADMIN_IDS) { try { await bot.api.sendMessage(aid, `📤 Retiro saldo #${id}\n👤 ${ctx.from!.username || ctx.from!.first_name}\n${fmtBal(credits)} → ${cup} CUP → ${phone}`, {}); } catch {} }
+});
 
-  let message = "📋 *TUS ÚLTIMAS APUESTAS*\n\n";
-  for (const bet of bets) {
-    const emoji = bet.status === "won" ? "✅" : bet.status === "lost" ? "❌" : bet.status === "void" ? "↩️" : "⏳";
-    message += `${emoji} ${bet.home_team || "??"} vs ${bet.away_team || "??"}\n`;
-    message += `   ${bet.bet_selection} @ ${bet.odds} | ${bet.amount} cr\n\n`;
-  }
-  await ctx.reply(message, { parse_mode: "Markdown" });
+bot.callbackQuery("bet_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
+  const bal = getUserBalance(ctx.from!.id);
+  if (bal <= 0) { await ctx.editMessageText("⚽ *APUESTAS*\n\n❌ Sin saldo. Deposita primero.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }); return; }
+  await ctx.editMessageText("⚽ *APUESTAS*\n\n🔄 Cargando partidos...", { parse_mode: "Markdown" });
+  try {
+    const fixtures = await getTodayFixtures();
+    if (!fixtures.length) { await ctx.editMessageText("⚽ *APUESTAS*\n\n😔 No hay partidos hoy.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }); return; }
+    const kb = new InlineKeyboard();
+    const show = fixtures.slice(0, 8);
+    show.forEach((f: any, i: number) => {
+      kb.text(`${f.teams.home.name} vs ${f.teams.away.name}`, `sel_${f.fixture.id}`);
+      if (i < show.length - 1) kb.row();
+    });
+    kb.row().text("🔙 Menú", "back_menu");
+    let msg = `⚽ *PARTIDOS DE HOY*\n\n💰 Saldo: ${fmtBal(bal)}\n\n`;
+    show.forEach((f: any) => { msg += formatFixture(f) + "\n\n"; });
+    msg += "Toca un partido para ver cuotas:";
+    await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+  } catch (e) { await ctx.editMessageText("❌ Error cargando partidos.", { reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }); }
 });
 
-// ============ ADMIN: Comandos ============
-bot.command("pendientes", async (ctx) => {
-  if (!ADMIN_IDS.includes(ctx.from.id)) {
-    await ctx.reply("❌ No tienes permisos");
-    return;
-  }
-
-  const deposits = db
-    .prepare("SELECT * FROM deposits WHERE status = 'pending' ORDER BY created_at DESC LIMIT 10")
-    .all();
-  const withdrawals = db
-    .prepare("SELECT * FROM withdrawals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 10")
-    .all();
-
-  let message = "📋 *PENDIENTES*\n\n";
-
-  if (deposits.length > 0) {
-    message += "💰 *Depósitos:*\n";
-    for (const d of deposits) {
-      message += `  #${d.id} | ${d.method === "saldo_movil" ? "📱" : "🏦"} ${d.amount_cup} CUP\n`;
-      message += `  /aprobar ${d.id} | /rechazar ${d.id}\n`;
-    }
-  }
-
-  if (withdrawals.length > 0) {
-    message += "\n💸 *Retiros:*\n";
-    for (const w of withdrawals) {
-      message += `  #${w.id} | ${w.method === "saldo_movil" ? "📱" : "🏦"} ${w.amount_cup} CUP → ${w.destination}\n`;
-      message += `  /pagar ${w.id}\n`;
-    }
-  }
-
-  if (deposits.length === 0 && withdrawals.length === 0) {
-    message += "✅ No hay nada pendiente";
-  }
-
-  await ctx.reply(message, { parse_mode: "Markdown" });
-});
-
-bot.command("pagar", async (ctx) => {
-  if (!ADMIN_IDS.includes(ctx.from.id)) {
-    await ctx.reply("❌ No tienes permisos");
-    return;
-  }
-  const id = parseInt(ctx.match || "0");
-  const result = approveWithdrawal(id, ctx.from.id);
-
-  if (result.success) {
-    await ctx.reply(result.message);
-    try {
-      await bot.api.sendMessage(
-        result.telegramId,
-        `✅ *¡Retiro completado!*\n\n${result.amount} CUP por ${result.method === "saldo_movil" ? "saldo móvil" : "transferencia"}\nDestino: ${result.destination}`,
-        { parse_mode: "Markdown" }
-      );
-    } catch (e) {}
-  } else {
-    await ctx.reply(result.message);
-  }
-});
-
-// Admin: liquidar apuesta
-bot.command("liquidar", async (ctx) => {
-  if (!ADMIN_IDS.includes(ctx.from.id)) {
-    await ctx.reply("❌ No tienes permisos");
-    return;
-  }
-  const parts = (ctx.match || "").trim().split(" ");
-  const betId = parseInt(parts[0] || "0");
-  const result = parts[1] || ""; // won, lost, void
-
-  if (!betId || !["won", "lost", "void"].includes(result)) {
-    await ctx.reply("❌ Usa: /liquidar ID resultado\n\nEjemplo: /liquidar 1 won\nResultados: won, lost, void");
-    return;
-  }
-
-  const res = settleBet(betId, result);
-  if (res.success) {
-    await ctx.reply(`✅ Apuesta #${betId} liquidada: ${result}`);
-    try {
-      await bot.api.sendMessage(res.telegramId, res.message, { parse_mode: "Markdown" });
-    } catch (e) {}
-  } else {
-    await ctx.reply(res.message);
-  }
-});
-
-// Admin: ver apuestas pendientes
-bot.command("apuestas", async (ctx) => {
-  if (!ADMIN_IDS.includes(ctx.from.id)) {
-    await ctx.reply("❌ No tienes permisos");
-    return;
-  }
-
-  const bets = db
-    .prepare("SELECT * FROM bets WHERE status = 'pending' ORDER BY created_at DESC LIMIT 10")
-    .all();
-
-  if (bets.length === 0) {
-    await ctx.reply("✅ No hay apuestas pendientes");
-    return;
-  }
-
-  let message = "📋 *APUESTAS PENDIENTES*\n\n";
-  for (const b of bets) {
-    message += `#${b.id} | ${b.home_team} vs ${b.away_team}\n`;
-    message += `  ${b.bet_selection} @ ${b.odds} | ${b.amount} cr\n`;
-    message += `  /liquidar ${b.id} won | /liquidar ${b.id} lost | /liquidar ${b.id} void\n\n`;
-  }
-
-  await ctx.reply(message, { parse_mode: "Markdown" });
-});
-
-// ============ VOLVER AL MENÚ ============
-bot.callbackQuery("back_menu", async (ctx) => {
-  const balance = getBalance(ctx.from.id);
-  const keyboard = new InlineKeyboard()
-    .text("💰 Depositar", "deposit")
-    .text("⚽ Apostar", "bet_menu")
-    .row()
-    .text("📊 Balance", "balance")
-    .text("💸 Retirar", "withdraw")
-    .row()
-    .text("📋 Historial", "history")
-    .text("❓ Ayuda", "help");
-
-  await ctx.reply(`🏠 *MENÚ*\n\n💵 Saldo: *${balance} créditos*`, {
-    parse_mode: "Markdown",
-    reply_markup: keyboard,
-  });
+bot.callbackQuery(/^sel_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
+  const fid = Number(ctx.match![1]);
+  try {
+    const oddsData = await getFixtureOdds(fid);
+    let hOdds = 0, dOdds = 0, aOdds = 0, name = `Partido #${fid}`;
+    if (oddsData.length > 0) {
+      const bets = oddsData[0].bookmakers?.[0]?.bets || [];
+      const mw = bets.find((b: any) => b.name === "Match Winner");
+      if (mw) for (const v of mw.values) { if (v.value === "Home") hOdds = Number(v.odd); if (v.value === "Draw") dOdds = Number(v.odd); if (v.value === "Away") aOdds = Number(v.odd); }
+      name = `${oddsData[0]?.teams?.home?.name || "Local"} vs ${oddsData[0]?.teams?.away?.name || "Visitante"}`;
+    }
+    if (!hOdds && !dOdds && !aOdds) { hOdds = 1.85; dOdds = 3.20; aOdds = 4.50; }
+    await ctx.editMessageText(
+      `⚽ *${name}*\n\n🏠 Local (${hOdds}) | 🤝 Empate (${dOdds}) | ✈️ Visitante (${aOdds})\n\n💰 Saldo: ${fmtBal(getUserBalance(ctx.from!.id))}`,
+      { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text(`🏠 ${hOdds}`, `bet_${fid}_1_${hOdds}`).text(`🤝 ${dOdds}`, `bet_${fid}_X_${dOdds}`).row().text(`✈️ ${aOdds}`, `bet_${fid}_2_${aOdds}`).row().text("🔙 Partidos", "bet_menu") }
+    );
+  } catch (e) { await ctx.editMessageText("❌ Error", { reply_markup: new InlineKeyboard().text("🔙 Partidos", "bet_menu") }); }
 });
 
-// ============ AYUDA ============
-bot.callbackQuery("help", async (ctx) => {
-  await ctx.reply(
-    `❓ *COMANDOS*\n\n` +
-      `*Usuario:*\n` +
-      `/start - Menú principal\n` +
-      `/depositar_saldo MONTO - Depositar\n` +
-      `/depositar_transfer MONTO - Depositar\n` +
-      `/depositado REF - Confirmar depósito\n` +
-      `/apostar MONTO - Hacer apuesta\n` +
-      `/retirar_saldo MONTO TEL - Retirar\n` +
-      `/retirar_transfer MONTO CUENTA - Retirar\n\n` +
-      `*Admin:*\n` +
-      `/pendientes - Ver pendientes\n` +
-      `/aprobar ID - Aprobar depósito\n` +
-      `/rechazar ID - Rechazar depósito\n` +
-      `/pagar ID - Completar retiro\n` +
-      `/apuestas - Ver apuestas pendientes\n` +
-      `/liquidar ID resultado - Liquidar apuesta`,
-    { parse_mode: "Markdown" }
+bot.callbackQuery(/^bet_(\d+)_(1|X|2)_([\d.]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const fid = Number(ctx.match![1]), bt = ctx.match![2], odds = Number(ctx.match![3]);
+  const labels: Record<string, string> = { "1": "Local", "X": "Empate", "2": "Visitante" };
+  setUserState(ctx.from!.id, "enter_stake", { fixtureId: fid, betType: bt, odds, betLabel: labels[bt] });
+  await ctx.editMessageText(
+    `🎯 *CONFIRMAR APUESTA*\n\n⚽ Partido #${fid}\n📌 ${labels[bt]}\n📊 Cuota: ${odds}\n\n💰 Saldo: ${fmtBal(getUserBalance(ctx.from!.id))}\n\nEscribe la cantidad de créditos a apostar:`,
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("❌ Cancelar", "cancel_bet") }
   );
-  await ctx.answerCallbackQuery();
 });
 
-// ============ INICIAR ============
-if (!RENDER_URL) {
-  // Modo local: usar polling
-  bot.start();
-  console.log("🤖 Bot iniciado (polling)");
-} else {
-  // Modo Render: usar webhook (ya configurado arriba)
-  console.log("🤖 Bot iniciado (webhook)");
-}
+bot.callbackQuery("cancel_bet", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  clearUserState(ctx.from!.id);
+  await ctx.editMessageText("❌ Cancelada.", { reply_markup: mainMenu() });
+});
+
+bot.on("message:text", async (ctx) => {
+  const state = getUserState(ctx.from!.id);
+  if (!state) return;
+  if (state.state === "enter_stake") {
+    const stake = Number(ctx.message.text.replace(",", "."));
+    if (!stake || stake <= 0) { await ctx.reply("❌ Cantidad inválida. Escribe un número."); return; }
+    const bal = getUserBalance(ctx.from!.id);
+    if (stake > bal) { await ctx.reply(`❌ Saldo insuficiente: ${fmtBal(bal)}`); return; }
+    const { fixtureId, betType, odds, betLabel } = state.data;
+    const result = createBet(ctx.from!.id, fixtureId, `Partido #${fixtureId}`, betType, betLabel, odds, stake);
+    if (!result) { await ctx.reply("❌ Error"); clearUserState(ctx.from!.id); return; }
+    clearUserState(ctx.from!.id);
+    await ctx.reply(
+      `✅ *¡APUESTA REALIZADA!*\n\n⚽ #${fixtureId}\n📌 ${betLabel} @ ${odds}\n🪙 Apostado: ${fmtBal(stake)}\n🏆 Posible: ${fmtBal(result.potentialWin)}\n📋 ID: #${result.betId}`,
+      { parse_mode: "Markdown", reply_markup: mainMenu() }
+    );
+  }
+});
+
+bot.callbackQuery("balance", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const bal = getUserBalance(ctx.from!.id);
+  await ctx.editMessageText(`💰 *TU SALDO*\n\n🪙 ${fmtBal(bal)}\n💵 = ${creditsToCup(bal)} CUP`, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") });
+});
+
+bot.callbackQuery("history", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const bets = getUserBets(ctx.from!.id);
+  if (!bets.length) { await ctx.editMessageText("📊 *MIS APUESTAS*\n\nNinguna todavía.", { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }); return; }
+  let msg = "📊 *MIS APUESTAS*\n\n";
+  const emojis: Record<string, string> = { pending: "⏳", won: "✅", lost: "❌", void: "↩️" };
+  for (const b of bets as any[]) msg += `${emojis[b.status] || "❓"} #${b.id} ${b.fixture_name}\n   ${b.bet_label} @ ${b.odds} | ${fmtBal(b.stake)} → ${fmtBal(b.potential_win)}\n\n`;
+  await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") });
+});
+
+bot.callbackQuery("help", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(
+    "❓ *AYUDA*\n\n⚽ Apostar → Selecciona partido y apuesta\n📥 Depositar → Transferencia o Saldo Móvil\n📤 Retirar → Transferencia o Saldo Móvil\n\n📝 Comandos:\n/start - Menú\n/depositar_transfer MONTO\n/depositar_saldo MONTO TELÉFONO\n/depositado ID\n/retirar_transfer CRÉDITOS TELÉFONO\n/retirar_saldo CRÉDITOS TELÉFONO\n/saldo - Ver saldo",
+    { parse_mode: "Markdown", reply_markup: new InlineKeyboard().text("🔙 Menú", "back_menu") }
+  );
+});
+
+bot.callbackQuery("back_menu", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(`⚽🎰 *Bot de Apuestas*\n\n💰 Saldo: ${fmtBal(getUserBalance(ctx.from!.id))}`, { parse_mode: "Markdown", reply_markup: mainMenu() });
+});
+
+// ============ ADMIN ============
+bot.command("pendientes", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const deps = getPendingDeposits() as any[], wds = getPendingWithdrawals() as any[];
+  let msg = "📋 *PENDIENTES*\n\n";
+  if (deps.length) { msg += "📥 DEPÓSITOS:\n"; deps.forEach(d => { msg += `#${d.id} | ${d.amount_cup} CUP → ${fmtBal(d.credits)} | User:${d.user_id}\n  /aprobar_dep ${d.id} | /rechazar_dep ${d.id}\n`; }); msg += "\n"; }
+  if (wds.length) { msg += "📤 RETIROS:\n"; wds.forEach(w => { msg += `#${w.id} | ${fmtBal(w.amount_credits)} → ${w.amount_cup} CUP → ${w.destination}\n  /aprobar_ret ${w.id} | /rechazar_ret ${w.id}\n`; }); msg += "\n"; }
+  if (!deps.length && !wds.length) msg += "✅ Sin pendientes.";
+  await ctx.reply(msg, { parse_mode: "Markdown" });
+});
+
+bot.command("aprobar_dep", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const id = Number(ctx.match?.trim());
+  if (!id) { await ctx.reply("❌ Usa: /aprobar_dep ID"); return; }
+  const dep = approveDeposit(id, ctx.from!.id);
+  if (!dep) { await ctx.reply("❌ No encontrado o procesado"); return; }
+  await ctx.reply(`✅ Depósito #${id} aprobado`);
+  try { await bot.api.sendMessage(dep.user_id, `✅ *Depósito aprobado*\n📋 #${id}\n🪙 +${fmtBal(dep.credits)}\n💰 Saldo: ${fmtBal(getUserBalance(dep.user_id))}`, { parse_mode: "Markdown" }); } catch {}
+});
+
+bot.command("rechazar_dep", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const id = Number(ctx.match?.trim());
+  if (!id) { await ctx.reply("❌ Usa: /rechazar_dep ID"); return; }
+  const dep = rejectDeposit(id, ctx.from!.id);
+  if (!dep) { await ctx.reply("❌ No encontrado"); return; }
+  await ctx.reply(`❌ Depósito #${id} rechazado`);
+  try { await bot.api.sendMessage(dep.user_id, `❌ *Depósito rechazado*\n📋 #${id}`, { parse_mode: "Markdown" }); } catch {}
+});
+
+bot.command("aprobar_ret", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const id = Number(ctx.match?.trim());
+  if (!id) { await ctx.reply("❌ Usa: /aprobar_ret ID"); return; }
+  const wd = approveWithdrawal(id, ctx.from!.id);
+  if (!wd) { await ctx.reply("❌ No encontrado"); return; }
+  await ctx.reply(`✅ Retiro #${id} aprobado`);
+  try { await bot.api.sendMessage(wd.user_id, `✅ *Retiro aprobado*\n📋 #${id}\n💵 ${wd.amount_cup} CUP → ${wd.destination}`, { parse_mode: "Markdown" }); } catch {}
+});
+
+bot.command("rechazar_ret", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const id = Number(ctx.match?.trim());
+  if (!id) { await ctx.reply("❌ Usa: /rechazar_ret ID"); return; }
+  const wd = rejectWithdrawal(id, ctx.from!.id);
+  if (!wd) { await ctx.reply("❌ No encontrado"); return; }
+  await ctx.reply(`❌ Retiro #${id} rechazado - créditos devueltos`);
+  try { await bot.api.sendMessage(wd.user_id, `❌ *Retiro rechazado*\n📋 #${id}\n🪙 ${fmtBal(wd.amount_credits)} devueltos\n💰 Saldo: ${fmtBal(getUserBalance(wd.user_id))}`, { parse_mode: "Markdown" }); } catch {}
+});
+
+bot.command("settle", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const args = ctx.match?.trim().split(/\s+/);
+  if (!args || args.length < 2) { await ctx.reply("❌ Usa: /settle ID_BET won|lost|void"); return; }
+  const betId = Number(args[0]), status = args[1] as "won" | "lost" | "void";
+  if (!["won", "lost", "void"].includes(status)) { await ctx.reply("❌ Usa: won, lost, o void"); return; }
+  const bet = settleBet(betId, status, `Admin: ${status}`);
+  if (!bet) { await ctx.reply("❌ No encontrada o resuelta"); return; }
+  const e = status === "won" ? "✅" : status === "lost" ? "❌" : "↩️";
+  await ctx.reply(`${e} Apuesta #${betId} → ${status}`);
+  try {
+    const m = status === "won" ? `🎉 *¡GANASTE!*\n📋 #${betId}\n🏆 +${fmtBal(bet.potential_win)}\n💰 Saldo: ${fmtBal(getUserBalance(bet.user_id))}`
+      : status === "lost" ? `😞 *Perdiste*\n📋 #${betId}\n🪙 -${fmtBal(bet.stake)}`
+      : `↩️ *Anulada*\n📋 #${betId}\n🪙 +${fmtBal(bet.stake)} devueltos`;
+    await bot.api.sendMessage(bet.user_id, m, { parse_mode: "Markdown" });
+  } catch {}
+});
+
+bot.command("addsaldo", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("❌ Solo admins"); return; }
+  const args = ctx.match?.trim().split(/\s+/);
+  if (!args || args.length < 2) { await ctx.reply("❌ Usa: /addsaldo USER_ID CANTIDAD"); return; }
+  const uid = Number(args[0]), amt = Number(args[1]);
+  if (!uid || !amt || amt <= 0) { await ctx.reply("❌ Parámetros inválidos"); return; }
+  ensureUser(uid);
+  addBalance(uid, amt);
+  await ctx.reply(`✅ +${fmtBal(amt)} al usuario ${uid}`);
+});
+
+bot.command("saldo", async (ctx) => {
+  await ctx.reply(`💰 Saldo: ${fmtBal(getUserBalance(ctx.from!.id))}\n💵 = ${creditsToCup(getUserBalance(ctx.from!.id))} CUP`, { reply_markup: mainMenu() });
+});
+
+bot.catch((err) => console.error("Bot error:", err));
+
+// ============ EXPRESS + WEBHOOK ============
+const app = express();
+app.use(express.json());
+
+app.get("/", (_req: any, res: any) => {
+  res.json({ status: "ok", bot: "betting-bot", time: new Date().toISOString() });
+});
+
+app.post("/webhook", async (req: any, res: any) => {
+  try {
+    await bot.handleUpdate(req.body);
+    res.sendStatus(200);
+  } catch (e) {
+    console.error("Webhook error:", e);
+    res.sendStatus(500);
+  }
+});
+
+app.listen(PORT, async () => {
+  console.log(`🚀 Server on port ${PORT}`);
+  if (RENDER_URL) {
+    try {
+      const url = `${RENDER_URL}/webhook`;
+      await bot.api.setWebhook(url);
+      console.log(`✅ Webhook: ${url}`);
+    } catch (e) { console.error("❌ Webhook error:", e); }
+  } else {
+    console.log("⚠️ RENDER_URL not set. Set it in Render env vars!");
+  }
+});
+
+console.log("🤖 Betting Bot starting...");
