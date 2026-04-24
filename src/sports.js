@@ -1,100 +1,48 @@
-const API_KEY = process.env.API_FOOTBALL_KEY || "";
-const BASE_URL = "https://api-football-v1.p.rapidapi.com/v3";
+const API_HOST = "v3.football.api-sports.io";
+const BASE_URL = `https://${API_HOST}`;
+let apiKey = "";
+export function setApiKey(key: string) { apiKey = key; }
 
-const sportEmojis = {
-  football: "⚽",
-  basketball: "🏀",
-  baseball: "⚾",
-};
-
-// Obtener partidos de hoy (fútbol)
-export async function getTodayFixtures() {
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const response = await fetch(
-      `${BASE_URL}/fixtures?date=${today}&timezone=America/Havana`,
-      {
-        headers: {
-          "X-RapidAPI-Key": API_KEY,
-          "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
-        },
-      }
-    );
-    const data = await response.json();
-    return data.response || [];
-  } catch (error) {
-    console.error("Error fetching fixtures:", error);
-    return [];
-  }
+async function apiRequest(endpoint: string, params: Record<string, string> = {}): Promise<any> {
+  const url = new URL(`${BASE_URL}${endpoint}`);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const response = await fetch(url.toString(), { method: "GET", headers: { "x-apisports-key": apiKey } });
+  if (!response.ok) throw new Error(`API-Football error: ${response.status}`);
+  const data: any = await response.json();
+  if (data.errors && Object.keys(data.errors).length > 0) throw new Error(`API errors: ${JSON.stringify(data.errors)}`);
+  return data;
 }
 
-// Obtener cuotas de un partido
-export async function getFixtureOdds(fixtureId) {
+export async function getTodayFixtures(): Promise<any[]> {
+  const today = new Date().toISOString().split("T")[0];
   try {
-    const response = await fetch(
-      `${BASE_URL}/odds?fixture=${fixtureId}&bookmaker=8`,
-      {
-        headers: {
-          "X-RapidAPI-Key": API_KEY,
-          "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
-        },
-      }
-    );
-    const data = await response.json();
-
-    if (!data.response || data.response.length === 0) return null;
-
-    const bookmaker = data.response[0].bookmakers?.[0];
-    if (!bookmaker) return null;
-
-    const matchWinner = bookmaker.bets?.find((b) => b.name === "Match Winner");
-    if (!matchWinner) return null;
-
-    const home = parseFloat(
-      matchWinner.values.find((v) => v.value === "Home")?.odd || "0"
-    );
-    const draw = parseFloat(
-      matchWinner.values.find((v) => v.value === "Draw")?.odd || "0"
-    );
-    const away = parseFloat(
-      matchWinner.values.find((v) => v.value === "Away")?.odd || "0"
-    );
-
-    if (home === 0 || away === 0) return null;
-    return { home, draw, away };
-  } catch (error) {
-    console.error("Error fetching odds:", error);
-    return null;
-  }
+    const data = await apiRequest("/fixtures", { date: today, timezone: "America/Havana" });
+    let fixtures = data.response || [];
+    const leagueIds = [39, 140, 135, 78, 61, 2, 13, 9, 1];
+    fixtures = fixtures.filter((f: any) => leagueIds.includes(f.league.id) || f.league.id <= 200);
+    fixtures.sort((a: any, b: any) => new Date(a.fixture.date).getTime() - new Date(b.fixture.date).getTime());
+    return fixtures.slice(0, 30);
+  } catch (e) { console.error("Fixtures error:", e); return []; }
 }
 
-// Obtener resultado de un partido
-export async function getFixtureResult(fixtureId) {
-  try {
-    const response = await fetch(`${BASE_URL}/fixtures?id=${fixtureId}`, {
-      headers: {
-        "X-RapidAPI-Key": API_KEY,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
-      },
-    });
-    const data = await response.json();
+export async function getFixtureOdds(fixtureId: number): Promise<any[]> {
+  try { const data = await apiRequest("/odds", { fixture: fixtureId.toString() }); return data.response || []; }
+  catch (e) { console.error("Odds error:", e); return []; }
+}
 
-    if (!data.response || data.response.length === 0) return null;
+export async function getFixtureResult(fixtureId: number): Promise<any | null> {
+  try { const data = await apiRequest("/fixtures", { id: fixtureId.toString() }); const f = data.response || []; return f.length > 0 ? f[0] : null; }
+  catch (e) { console.error("Result error:", e); return null; }
+}
 
-    const fixture = data.response[0];
-    const status = fixture.fixture.status.short;
-
-    // FT = Full Time, AET = After Extra Time, PEN = Penalties
-    const isFinished = ["FT", "AET", "PEN"].includes(status);
-
-    return {
-      home: fixture.goals.home,
-      away: fixture.goals.away,
-      status,
-      isFinished,
-    };
-  } catch (error) {
-    console.error("Error fetching result:", error);
-    return null;
-  }
+export function formatFixture(fixture: any): string {
+  const home = fixture.teams.home.name, away = fixture.teams.away.name, league = fixture.league.name;
+  const date = new Date(fixture.fixture.date), timeStr = date.toLocaleTimeString("es-CU", { hour: "2-digit", minute: "2-digit" });
+  const s = fixture.fixture.status.short;
+  let t = "";
+  if (s === "NS") t = `⏰ ${timeStr}`;
+  else if (s === "1H" || s === "2H" || s === "HT") t = `🔴 EN VIVO ${fixture.goals.home}-${fixture.goals.away}`;
+  else if (s === "FT") t = `✅ FINAL ${fixture.goals.home}-${fixture.goals.away}`;
+  else t = `📋 ${s}`;
+  return `${league}\n⚽ ${home} vs ${away}\n${t}`;
 }
