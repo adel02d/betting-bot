@@ -1,0 +1,13 @@
+{
+  "name": "betting-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0",
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0"
+  }
+}
