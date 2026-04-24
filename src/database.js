@@ -9,7 +9,7 @@ const db = new Database(path.join(dataDir, "bot.db"));
 db.pragma("journal_mode = WAL");
 
 db.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT DEFAULT '', first_name TEXT DEFAULT '', balance REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
-db.exec("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL CHECK(method IN ('transferencia', 'saldo_movil')), amount_cup REAL NOT NULL, credits REAL NOT NULL, reference TEXT DEFAULT '', phone TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')), admin_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME);");
+db.exec("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL CHECK(method IN ('transferencia', 'saldo_movil')), amount_cup REAL NOT NULL, credits REAL NOT NULL, reference TEXT DEFAULT '', phone TEXT DEFAULT '', photo_file_id TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')), admin_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME);");
 db.exec("CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, method TEXT NOT NULL CHECK(method IN ('transferencia', 'saldo_movil')), amount_credits REAL NOT NULL, amount_cup REAL NOT NULL, destination TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')), admin_id INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, resolved_at DATETIME);");
 db.exec("CREATE TABLE IF NOT EXISTS bets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, fixture_id INTEGER NOT NULL, fixture_name TEXT NOT NULL, bet_type TEXT NOT NULL, bet_label TEXT NOT NULL, odds REAL NOT NULL, stake REAL NOT NULL, potential_win REAL NOT NULL, status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'won', 'lost', 'void')), result TEXT DEFAULT '', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, settled_at DATETIME);");
 db.exec("CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT DEFAULT '{}', updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);");
@@ -54,7 +54,13 @@ function createDeposit(userId, method, amountCup, credits, reference, phone) {
   return Number(db.prepare("INSERT INTO deposits (user_id, method, amount_cup, credits, reference, phone) VALUES (?, ?, ?, ?, ?, ?)").run(userId, method, amountCup, credits, reference, phone).lastInsertRowid);
 }
 
+function updateDepositPhoto(depositId, photoFileId) {
+  db.prepare("UPDATE deposits SET photo_file_id = ? WHERE id = ?").run(photoFileId, depositId);
+}
+
 function getPendingDeposits() { return db.prepare("SELECT * FROM deposits WHERE status = 'pending' ORDER BY created_at DESC").all(); }
+
+function getDepositById(id) { return db.prepare("SELECT * FROM deposits WHERE id = ?").get(id); }
 
 function approveDeposit(depositId, adminId) {
   const d = db.prepare("SELECT * FROM deposits WHERE id = ?").get(depositId);
@@ -118,7 +124,7 @@ function getBetById(betId) { return db.prepare("SELECT * FROM bets WHERE id = ?"
 module.exports = {
   ensureUser, getUserBalance, addBalance, subtractBalance,
   setUserState, getUserState, clearUserState,
-  createDeposit, getPendingDeposits, approveDeposit, rejectDeposit,
+  createDeposit, updateDepositPhoto, getPendingDeposits, getDepositById, approveDeposit, rejectDeposit,
   createWithdrawal, getPendingWithdrawals, approveWithdrawal, rejectWithdrawal,
   createBet, getPendingBets, settleBet, getUserBets, getBetById
 };
