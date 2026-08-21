@@ -1,0 +1,13 @@
+{
+  "last_updated": "2026-08-18",
+  "productos": [
+    {"id": "panel-100w", "modelo": "Panel Solar Monocristalino 100W", "categoria": "Paneles Solares", "potencia": "100W", "precio_usd": 90, "precio_cup": 22000, "stock": true},
+    {"id": "panel-200w", "modelo": "Panel Solar 200W - 12V", "categoria": "Paneles Solares", "potencia": "200W", "precio_usd": 150, "precio_cup": 38000, "stock": true},
+    {"id": "panel-350w", "modelo": "Panel Solar 350W - Alta Eficiencia", "categoria": "Paneles Solares", "potencia": "350W", "precio_usd": 210, "precio_cup": 52000, "stock": true},
+    {"id": "panel-550w", "modelo": "Panel Solar 550W - Tier 1", "categoria": "Paneles Solares", "potencia": "550W", "precio_usd": 280, "precio_cup": 70000, "stock": true},
+    {"id": "bat-12v100", "modelo": "Bateria LiFePO4 12V 100Ah - Smart BMS", "categoria": "Baterias", "capacidad": "1280Wh", "precio_usd": 350, "precio_cup": 88000, "stock": true},
+    {"id": "bat-24v100", "modelo": "Bateria LiFePO4 24V 100Ah", "categoria": "Baterias", "capacidad": "2560Wh", "precio_usd": 650, "precio_cup": 165000, "stock": true},
+    {"id": "bat-48v100", "modelo": "Bateria LiFePO4 48V 100Ah - Rack", "categoria": "Baterias", "capacidad": "5120Wh", "precio_usd": 1150, "precio_cup": 290000, "stock": true}
+  ],
+  "productos_nuevos": []
+}

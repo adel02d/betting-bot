@@ -1,3 +1,36 @@
-node_modules/
-data/
+# Secretos — NUNCA subir
 .env
+*.env
+
+# Base de datos local
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env.local
+
+# Node (legacy betting-bot)
+node_modules/
+dist/
+build/
+
+# Knowledge privado (si contiene datos sensibles)
+# knowledge/* — mantenemos archivos .gitkeep y catálogos base
+
+# Session state
+config/session.yaml
+data/pedidos/*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

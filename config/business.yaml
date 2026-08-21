@@ -1,0 +1,157 @@
+empresa:
+  nombre: EnergixCu
+  descripcion: "Empresa cubana especializada en soluciones de energia solar y tecnologia."
+  slogan: "Energia inteligente para Cuba"
+  fundacion: 2023
+  ubicacion: "La Habana, Cuba"
+
+agente:
+  nombre: Jose
+  rol: "Asesor virtual de ventas y especialista en atencion al cliente"
+  personalidad: "Atento, profesional, empatico y servicial"
+  idioma: "Espanol claro y natural"
+
+horario_atencion:
+  dias: "Lunes a Domingo"
+  horas: "8am a 9pm"
+  mensaje_fuera_horario: "Gracias por escribir a EnergixCu. Nuestro horario es de Lunes a Domingo de 8am a 9pm."
+
+metodos_pago:
+  lista:
+    - nombre: EFECTIVO
+      descripcion: "Pagado al momento de la entrega o contra entrega"
+      disponible: true
+    - nombre: TRANSFERENCIA
+      descripcion: "Transfermovil, EnZona o tarjeta MLC/CUP segun coordinacion"
+      disponible: true
+  nota: "Solo trabajamos con efectivo y transferencia."
+
+zonas_entrega:
+  base: "La Habana y envios nacionales"
+  provincias:
+    - "La Habana"
+    - "Artemisa"
+    - "Mayabeque"
+    - "Matanzas"
+    - "Cienfuegos"
+    - "Villa Clara"
+    - "Sancti Spiritus"
+    - "Ciego de Avila"
+    - "Camaguey"
+    - "Las Tunas"
+    - "Granma"
+    - "Holguin"
+    - "Santiago de Cuba"
+    - "Guantanamo"
+  condiciones: "Entrega Habana 24-48h, provincias 2-5 dias."
+  mensaje: "Hacemos entregas en toda La Habana y envios a todas las provincias."
+
+catalogo_base:
+  - categoria: "Paneles Solares"
+    productos:
+      - modelo: "Panel Solar Monocristalino 100W"
+        potencia: "100W"
+        voltaje: "18V"
+        precio_usd: 90
+        precio_cup: 22000
+        stock: true
+      - modelo: "Panel Solar 200W - 12V"
+        potencia: "200W"
+        voltaje: "20V"
+        precio_usd: 150
+        precio_cup: 38000
+        stock: true
+      - modelo: "Panel Solar 350W - Alta Eficiencia"
+        potencia: "350W"
+        voltaje: "24V"
+        precio_usd: 210
+        precio_cup: 52000
+        stock: true
+      - modelo: "Panel Solar 550W - Tier 1"
+        potencia: "550W"
+        voltaje: "42V"
+        precio_usd: 280
+        precio_cup: 70000
+        stock: true
+
+  - categoria: "Baterias LiFePO4"
+    productos:
+      - modelo: "Bateria LiFePO4 12V 100Ah - Smart BMS"
+        capacidad: "1280Wh"
+        voltaje: "12.8V"
+        precio_usd: 350
+        precio_cup: 88000
+        stock: true
+      - modelo: "Bateria LiFePO4 24V 100Ah"
+        capacidad: "2560Wh"
+        voltaje: "25.6V"
+        precio_usd: 650
+        precio_cup: 165000
+        stock: true
+      - modelo: "Bateria LiFePO4 48V 100Ah - Rack"
+        capacidad: "5120Wh"
+        voltaje: "51.2V"
+        precio_usd: 1150
+        precio_cup: 290000
+        stock: true
+      - modelo: "Bateria Gel 12V 200Ah"
+        capacidad: "2400Wh"
+        voltaje: "12V"
+        precio_usd: 280
+        precio_cup: 70000
+        stock: true
+
+  - categoria: "Inversores"
+    productos:
+      - modelo: "Inversor Onda Pura 1000W 12V a 110V"
+        potencia: "1000W"
+        precio_usd: 120
+        precio_cup: 30000
+        stock: true
+      - modelo: "Inversor Hibrido 3000W 24V MPPT 60A"
+        potencia: "3000W"
+        precio_usd: 450
+        precio_cup: 115000
+        stock: true
+      - modelo: "Inversor Hibrido 5000W 48V MPPT 80A"
+        potencia: "5000W"
+        precio_usd: 750
+        precio_cup: 190000
+        stock: true
+
+  - categoria: "Estaciones"
+    productos:
+      - modelo: "EcoFlow Style 500Wh - 500W"
+        capacidad: "500Wh"
+        precio_usd: 380
+        precio_cup: 95000
+        stock: true
+      - modelo: "PowerStation 1000Wh - 1000W"
+        capacidad: "1000Wh"
+        precio_usd: 650
+        precio_cup: 165000
+        stock: true
+      - modelo: "PowerStation Pro 2000Wh - 2000W"
+        capacidad: "2048Wh"
+        precio_usd: 1150
+        precio_cup: 290000
+        stock: true
+
+  - categoria: "Kits Solares"
+    productos:
+      - modelo: "Kit Basico 1kW - Respaldo Esencial"
+        precio_usd: 650
+        precio_cup: 165000
+        stock: true
+      - modelo: "Kit Intermedio 3kW - Casa Completa"
+        precio_usd: 1850
+        precio_cup: 470000
+        stock: true
+      - modelo: "Kit Pro 5kW - Autonomia Total"
+        precio_usd: 3200
+        precio_cup: 810000
+        stock: true
+
+metadatos:
+  creado: "2026-08-18"
+  version: "2.0 - EnergixCu"
